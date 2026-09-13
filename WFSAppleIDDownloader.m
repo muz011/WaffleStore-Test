@@ -983,16 +983,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 				[diagnostics addObject:@"bag.xml: no SAP config found, using built-in endpoints"];
 			}
 			NSString* authEndpoint = sapConfig[@"authenticateAccount"];
-			if (!authEndpoint.length)
-			{
-				authEndpoint = kWFSLegacyAuthEndpoint;
-			}
 			NSMutableArray* candidates = [NSMutableArray array];
-			[candidates addObject:kWFSLegacyAuthEndpoint];
-			if (authEndpoint.length && ![authEndpoint isEqualToString:kWFSLegacyAuthEndpoint])
+			if (authEndpoint.length && [self validateAuthenticationEndpoint:authEndpoint])
 			{
 				[candidates addObject:authEndpoint];
 			}
+			[candidates addObject:kWFSLegacyAuthEndpoint];
 			[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt retryCount:0 diagnostics:diagnostics completion:completion];
 		}];
 	}];
@@ -1629,6 +1625,33 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 - (NSString*)percentEncode:(NSString*)string
 {
 	return [string stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+}
+
+- (BOOL)validateAuthenticationEndpoint:(NSString*)endpoint
+{
+	if (endpoint.length == 0)
+	{
+		return NO;
+	}
+	NSURL* url = [NSURL URLWithString:endpoint];
+	if (!url)
+	{
+		return NO;
+	}
+	if (![url.scheme isEqualToString:@"https"] || url.host.length == 0)
+	{
+		return NO;
+	}
+	NSString* host = url.host.lowercaseString;
+	if (![host isEqualToString:kWFSBuyHost] && ![host hasSuffix:@"-buy.itunes.apple.com"])
+	{
+		return NO;
+	}
+	if (![url.path isEqualToString:@"/WebObjects/MZFinance.woa/wa/authenticate"])
+	{
+		return NO;
+	}
+	return YES;
 }
 
 - (NSDictionary*)parseJSONResponse:(NSData*)data
