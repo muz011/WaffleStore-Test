@@ -40,7 +40,7 @@ static NSString *const kEntryNames[] = {
 
 @interface WFSSAPMachOImage : NSObject
 @property (nonatomic, copy) NSString *name;
-@property (nonatomic, strong) NSData *data;
+@property (nonatomic, strong) NSMutableData *data;
 @property (nonatomic, assign) uint64_t base;
 @property (nonatomic, strong) NSArray<NSDictionary *> *segments;
 @property (nonatomic, strong) NSArray<NSDictionary *> *rebases;
@@ -86,7 +86,7 @@ static NSString *const kEntryNames[] = {
         return nil;
     }
 
-    _data = [sliceData mutableCopy];
+    _data = [sliceData mutableCopy] ?: [[NSMutableData alloc] initWithData:sliceData];
 
     const struct mach_header_64 *hdr = (const struct mach_header_64 *)bytes;
     _base = hdr->reserved;
