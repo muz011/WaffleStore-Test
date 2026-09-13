@@ -6,6 +6,13 @@
 #import <mach-o/nlist.h>
 #import <dlfcn.h>
 
+#ifndef INDIRECT_SYMBOL_ABS
+#define INDIRECT_SYMBOL_ABS    0x40000000
+#endif
+#ifndef INDIRECT_SYMBOL_LOCAL
+#define INDIRECT_SYMBOL_LOCAL  0x80000000
+#endif
+
 static const uint64_t kReturnAddress   = 0x0000000100000000;
 static const uint64_t kCoreFPBase      = 0x0000100000000000;
 static const uint64_t kCommerceBase    = 0x0000100040000000;
@@ -144,12 +151,14 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
                     uint64_t secAddr = sec[j].addr;
                     uint64_t secSize = sec[j].size;
                     uint64_t secOff = sec[j].offset;
+                    uint32_t indirectIndex = sec[j].reserved1;
                     uint64_t ptrCount = secSize / 8;
                     for (uint64_t k = 0; k < ptrCount; k++) {
                         [rebases addObject:@{
                             @"segment": @(seg->segname),
                             @"offset": @(secAddr - seg->vmaddr + k * 8),
                             @"fileOffset": @(secOff + k * 8),
+                            @"indirectIndex": @(indirectIndex + (uint32_t)k),
                         }];
                     }
                 }
@@ -178,161 +187,29 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
             if (!symName || symName[0] != '_') continue;
             exports[@(symName)] = @(syms[j].n_value);
         }
-    }
 
-    if (symtabCmd && dysymtabCmd && symtabCmd->symoff > 0 && symtabCmd->stroff > 0) {
-        const uint8_t *strtab = bytes + symtabCmd->stroff;
-        const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtabCmd->symoff);
+        if (dysymtabCmd && dysymtabCmd->nindirectsyms > 0 && dysymtabCmd->indirectsymoff > 0) {
+            const uint32_t *indirectSyms = (const uint32_t *)(bytes + dysymtabCmd->indirectsymoff);
 
-        if (dysymtabCmd->nbindogo > 0 && dysymtabCmd->bindoff > 0) {
-            const uint8_t *bindBytes = bytes + dysymtabCmd->bindoff;
-            const uint8_t *bindEnd = bindBytes + dysymtabCmd->nbindogo;
+            for (NSDictionary *rebase in rebases) {
+                uint32_t indirectIdx = [rebase[@"indirectIndex"] unsignedIntValue];
+                if (indirectIdx >= dysymtabCmd->nindirectsyms) continue;
 
-            uint8_t segIdx = 0;
-            int64_t addend = 0;
-            uint64_t segOffset = 0;
-            NSString *segName = @"";
-            NSString *symName = @"";
-            BOOL done = NO;
+                uint32_t symIdx = indirectSyms[indirectIdx];
+                if (symIdx & INDIRECT_SYMBOL_ABS || symIdx & INDIRECT_SYMBOL_LOCAL) continue;
+                if (symIdx >= symtabCmd->nsyms) continue;
 
-            const uint8_t *p = bindBytes;
-            while (p < bindEnd && !done) {
-                uint8_t byte = *p++;
-                uint8_t opcode = byte & 0xF0;
-                uint8_t imm = byte & 0x0F;
+                const char *symName = (const char *)(strtab + syms[symIdx].n_un.n_strx);
+                if (!symName || symName[0] != '_') continue;
 
-                switch (opcode) {
-                    case 0x00: {
-                        if (imm == 0) done = YES;
-                        break;
-                    }
-                    case 0x10: {
-                        segIdx = imm;
-                        break;
-                    }
-                    case 0x20: {
-                        segOffset = imm;
-                        break;
-                    }
-                    case 0x30: {
-                        uint64_t uleb = 0;
-                        int shift = 0;
-                        while (p < bindEnd) {
-                            uint8_t b = *p++;
-                            uleb |= (uint64_t)(b & 0x7F) << shift;
-                            if ((b & 0x80) == 0) break;
-                            shift += 7;
-                        }
-                        segOffset = uleb;
-                        break;
-                    }
-                    case 0x40: {
-                        addend = imm;
-                        break;
-                    }
-                    case 0x50: {
-                        int64_t sleb = 0;
-                        int shift = 0;
-                        while (p < bindEnd) {
-                            uint8_t b = *p++;
-                            sleb |= (int64_t)(b & 0x7F) << shift;
-                            shift += 7;
-                            if ((b & 0x80) == 0) {
-                                if (shift < 64 && (b & 0x40)) sleb |= -(1LL << shift);
-                                break;
-                            }
-                        }
-                        addend = sleb;
-                        break;
-                    }
-                    case 0x60: {
-                        uint8_t symIdx = imm;
-                        uint64_t uleb = 0;
-                        int shift = 0;
-                        while (p < bindEnd) {
-                            uint8_t b = *p++;
-                            uleb |= (uint64_t)(b & 0x7F) << shift;
-                            if ((b & 0x80) == 0) break;
-                            shift += 7;
-                        }
-                        uint64_t flags = uleb;
-                        (void)flags;
+                if (exports[@(symName)]) continue;
 
-                        if (symIdx < symtabCmd->nsyms) {
-                            const char *sn = (const char *)(strtab + syms[symIdx].n_un.n_strx);
-                            if (sn) symName = @(sn);
-                        }
-
-                        if (segIdx < segments.count && symName.length > 0) {
-                            segName = segments[segIdx][@"name"];
-                            WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
-                            bind.symbol = symName;
-                            bind.segment = segName;
-                            bind.segOffset = segOffset;
-                            bind.addend = addend;
-                            [binds addObject:bind];
-                        }
-                        break;
-                    }
-                    case 0x70: {
-                        break;
-                    }
-                    case 0x90: {
-                        uint8_t symIdx = imm;
-                        uint64_t uleb = 0;
-                        int shift = 0;
-                        while (p < bindEnd) {
-                            uint8_t b = *p++;
-                            uleb |= (uint64_t)(b & 0x7F) << shift;
-                            if ((b & 0x80) == 0) break;
-                            shift += 7;
-                        }
-                        (void)uleb;
-
-                        if (symIdx < symtabCmd->nsyms) {
-                            const char *sn = (const char *)(strtab + syms[symIdx].n_un.n_strx);
-                            if (sn) symName = @(sn);
-                        }
-
-                        if (symName.length > 0) {
-                            WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
-                            bind.symbol = symName;
-                            bind.segment = @"";
-                            bind.segOffset = segOffset;
-                            bind.addend = 0;
-                            [binds addObject:bind];
-                        }
-                        break;
-                    }
-                    case 0xA0: {
-                        uint8_t count = imm;
-                        if (count == 0) {
-                            uint64_t uleb = 0;
-                            int shift = 0;
-                            while (p < bindEnd) {
-                                uint8_t b = *p++;
-                                uleb |= (uint64_t)(b & 0x7F) << shift;
-                                if ((b & 0x80) == 0) break;
-                                shift += 7;
-                            }
-                            count = (uint8_t)uleb;
-                        }
-                        for (uint8_t r = 0; r < count; r++) {
-                            if (symName.length > 0 && segIdx < segments.count) {
-                                WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
-                                bind.symbol = symName;
-                                bind.segment = segments[segIdx][@"name"];
-                                bind.segOffset = segOffset;
-                                bind.addend = addend;
-                                [binds addObject:bind];
-                            }
-                            segOffset += 8;
-                        }
-                        break;
-                    }
-                    default:
-                        break;
-                }
+                WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
+                bind.symbol = @(symName);
+                bind.segment = rebase[@"segment"];
+                bind.segOffset = [rebase[@"offset"] unsignedLongLongValue];
+                bind.addend = 0;
+                [binds addObject:bind];
             }
         }
     }
@@ -605,7 +482,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
             _unicorn.hookAdd(_engine, &shimHook, UC_HOOK_CODE,
                              (void *)shimCodeHookCallback,
                              (uint64_t)(__bridge void *)_shims,
-                             0, kShimBase, kShimBase + 0x80000 - 1);
+                             0, 0x0000200000000000ULL, 0x0000200000080000ULL);
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {

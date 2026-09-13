@@ -197,15 +197,15 @@ static const uint64_t kShimHeapSize = 16 << 20;
 
 - (uint64_t)resolveSymbol:(NSString *)name error:(NSError **)error
 {
-    NSNumber *addr = _symbols[name];
-    if (addr) return addr.unsignedLongLongValue;
+    NSNumber *existing = _symbols[name];
+    if (existing) return existing.unsignedLongLongValue;
 
-    uint64_t addr = [self addFunction:name handler:@selector(shim_unsupported)];
-    if (addr == 0) {
+    uint64_t newAddr = [self addFunction:name handler:@selector(shim_unsupported)];
+    if (newAddr == 0) {
         if (error) *error = [self shimError:[NSString stringWithFormat:@"shim area full resolving %@", name]];
         return 0;
     }
-    return addr;
+    return newAddr;
 }
 
 #pragma mark - Function Registration
@@ -555,14 +555,18 @@ static const uint64_t kShimHeapSize = 16 << 20;
 {
     uint64_t addr = [self argumentAtIndex:0];
     NSString *str = [self readGuestCString:addr];
-    [self setResult:(uint64_t)[str unsignedLongLongValue]];
+    char *end = NULL;
+    unsigned long long val = strtoull(str.UTF8String, &end, 10);
+    [self setResult:val];
 }
 
 - (void)shim_strtoull
 {
     uint64_t addr = [self argumentAtIndex:0];
     NSString *str = [self readGuestCString:addr];
-    [self setResult:(uint64_t)[str unsignedLongLongValue]];
+    char *end = NULL;
+    unsigned long long val = strtoull(str.UTF8String, &end, 10);
+    [self setResult:val];
 }
 
 - (void)shim_qsort { }
