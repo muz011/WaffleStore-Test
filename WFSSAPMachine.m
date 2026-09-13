@@ -36,33 +36,277 @@ static NSString *const kEntryNames[] = {
     @"_jEHf8Xzsv8K",
 };
 
+#pragma mark - Mach-O Image
+
 @interface WFSSAPMachOImage : NSObject
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, strong) NSData *data;
 @property (nonatomic, assign) uint64_t base;
-@property (nonatomic, assign) uint64_t textOffset;
 @property (nonatomic, strong) NSArray<NSDictionary *> *segments;
 @property (nonatomic, strong) NSArray<NSDictionary *> *rebases;
-@property (nonatomic, strong) NSArray<NSDictionary *> *binds;
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *exports;
 @property (nonatomic, assign) BOOL relocated;
 @property (nonatomic, assign) uint64_t loadedBase;
+- (nullable instancetype)initWithName:(NSString *)name data:(NSData *)data error:(NSError **)error;
+- (nullable NSNumber *)exportAddress:(NSString *)symbolName loadBase:(uint64_t)loadBase error:(NSError **)error;
+- (void)relocate:(uint64_t)loadBase resolver:(uint64_t(^)(NSString *))resolver error:(NSError **)error;
+- (void)loadIntoEngine:(WFSUnicornAPI *)api engine:(uc_engine)engine error:(NSError **)error;
 @end
 
 @implementation WFSSAPMachOImage
+
+- (nullable instancetype)initWithName:(NSString *)name data:(NSData *)rawData error:(NSError **)error
+{
+    self = [super init];
+    if (!self) return nil;
+
+    _name = [name copy];
+
+    const uint8_t *bytes = rawData.bytes;
+    NSUInteger length = rawData.length;
+
+    if (length < sizeof(uint32_t)) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: data too short", name]];
+        return nil;
+    }
+
+    uint32_t magic = *(const uint32_t *)bytes;
+    NSData *sliceData = rawData;
+
+    if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
+        sliceData = [self extractX86_64Slice:rawData name:name error:error];
+        if (!sliceData) return nil;
+        bytes = sliceData.bytes;
+        length = sliceData.length;
+        magic = *(const uint32_t *)bytes;
+    }
+
+    if (magic != MH_MAGIC_64) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: not x86-64 (magic=0x%x)", name, magic]];
+        return nil;
+    }
+
+    _data = sliceData;
+
+    const struct mach_header_64 *hdr = (const struct mach_header_64 *)bytes;
+    _base = hdr->reserved;
+
+    NSMutableArray *segments = [NSMutableArray array];
+    NSMutableArray *rebases = [NSMutableArray array];
+    NSMutableDictionary *exports = [NSMutableDictionary dictionary];
+
+    const uint8_t *cmd = bytes + sizeof(struct mach_header_64);
+
+    for (uint32_t i = 0; i < hdr->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cmd;
+
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)cmd;
+
+            [segments addObject:@{
+                @"name": @(seg->segname),
+                @"vmaddr": @(seg->vmaddr),
+                @"vmsize": @(seg->vmsize),
+                @"fileoff": @(seg->fileoff),
+                @"filesize": @(seg->filesize),
+            }];
+
+            const struct section_64 *sec = (const struct section_64 *)(cmd + sizeof(struct segment_command_64));
+            uint32_t nsects = (seg->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64);
+
+            for (uint32_t j = 0; j < nsects; j++) {
+                uint32_t secType = sec[j].flags & SECTION_TYPE;
+                if (secType == S_LAZY_SYMBOL_POINTERS || secType == S_NON_LAZY_SYMBOL_POINTERS) {
+                    uint64_t secAddr = sec[j].addr;
+                    uint64_t secSize = sec[j].size;
+                    uint64_t secOff = sec[j].offset;
+                    uint64_t ptrCount = secSize / 8;
+                    for (uint64_t k = 0; k < ptrCount; k++) {
+                        [rebases addObject:@{
+                            @"segment": @(seg->segname),
+                            @"offset": @(secAddr - seg->vmaddr + k * 8),
+                            @"fileOffset": @(secOff + k * 8),
+                        }];
+                    }
+                }
+            }
+        }
+
+        if (lc->cmd == LC_SYMTAB) {
+            const struct symtab_command *symtab = (const struct symtab_command *)cmd;
+            if (symtab->symoff == 0 || symtab->stroff == 0) {
+                cmd += lc->cmdsize;
+                continue;
+            }
+            const uint8_t *strtab = bytes + symtab->stroff;
+            const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtab->symoff);
+
+            for (uint32_t j = 0; j < symtab->nsyms; j++) {
+                if (syms[j].n_value == 0) continue;
+                if (syms[j].n_type & N_STAB) continue;
+                const char *symName = (const char *)(strtab + syms[j].n_un.n_strx);
+                if (!symName || symName[0] != '_') continue;
+                exports[@(symName)] = @(syms[j].n_value);
+            }
+        }
+
+        cmd += lc->cmdsize;
+    }
+
+    _segments = segments;
+    _rebases = rebases;
+    _exports = exports;
+
+    return self;
+}
+
+- (nullable NSNumber *)exportAddress:(NSString *)symbolName loadBase:(uint64_t)loadBase error:(NSError **)error
+{
+    NSNumber *addr = _exports[symbolName];
+    if (!addr) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"symbol %@ not found in %@", symbolName, _name]];
+        return nil;
+    }
+    uint64_t symbolAddr = addr.unsignedLongLongValue;
+    if (symbolAddr < _base) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"symbol %@ precedes base in %@", symbolName, _name]];
+        return nil;
+    }
+    return @(loadBase + (symbolAddr - _base));
+}
+
+- (void)relocate:(uint64_t)loadBase resolver:(uint64_t(^)(NSString *))resolver error:(NSError **)error
+{
+    if (_relocated) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@ already relocated", _name]];
+        return;
+    }
+
+    for (NSDictionary *rebase in _rebases) {
+        NSString *segName = rebase[@"segment"];
+        uint64_t offset = [rebase[@"offset"] unsignedLongLongValue];
+        uint64_t fileOff = [self fileOffsetForSegment:segName offset:offset size:8 error:error];
+        if (error && *error) return;
+
+        uint64_t pointer = 0;
+        memcpy(&pointer, _data.bytes + fileOff, 8);
+        uint64_t newAddr = loadBase + (pointer - _base);
+
+        uint8_t *mutable = (uint8_t *)_data.mutableBytes;
+        memcpy(mutable + fileOff, &newAddr, 8);
+    }
+
+    _relocated = YES;
+    _loadedBase = loadBase;
+}
+
+- (void)loadIntoEngine:(WFSUnicornAPI *)api engine:(uc_engine)engine error:(NSError **)error
+{
+    if (!_relocated) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@ must be relocated first", _name]];
+        return;
+    }
+
+    uint64_t span = 0;
+    for (NSDictionary *seg in _segments) {
+        if ([seg[@"name"] isEqualToString:@"__PAGEZERO"]) continue;
+        uint64_t segSize = [seg[@"vmsize"] unsignedLongLongValue];
+        if (segSize == 0) continue;
+        uint64_t segAddr = [seg[@"vmaddr"] unsignedLongLongValue];
+        uint64_t end = (segAddr - _base) + segSize;
+        if (end > span) span = end;
+    }
+
+    span = (span + kPageSize - 1) & ~(kPageSize - 1);
+    if (span == 0) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: no loadable segments", _name]];
+        return;
+    }
+
+    int rc = api->memMap(engine, _loadedBase, span, UC_PROT_ALL);
+    if (rc != 0) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"memMap %@ failed: %s", _name, api->strerror(rc)]];
+        return;
+    }
+
+    for (NSDictionary *seg in _segments) {
+        if ([seg[@"name"] isEqualToString:@"__PAGEZERO"]) continue;
+        uint64_t fileSize = [seg[@"filesize"] unsignedLongLongValue];
+        if (fileSize == 0) continue;
+        uint64_t segAddr = [seg[@"vmaddr"] unsignedLongLongValue];
+        uint64_t segFileOff = [seg[@"fileoff"] unsignedLongLongValue];
+        uint64_t destAddr = _loadedBase + (segAddr - _base);
+
+        rc = api->memWrite(engine, destAddr, _data.bytes + segFileOff, fileSize);
+        if (rc != 0) {
+            if (error) *error = [self err:[NSString stringWithFormat:@"memWrite %@ seg %@: %s", _name, seg[@"name"], api->strerror(rc)]];
+            return;
+        }
+    }
+}
+
+#pragma mark - Helpers
+
+- (uint64_t)fileOffsetForSegment:(NSString *)segName offset:(uint64_t)offset size:(uint64_t)size error:(NSError **)error
+{
+    for (NSDictionary *seg in _segments) {
+        if (![seg[@"name"] isEqualToString:segName]) continue;
+        uint64_t segFileOff = [seg[@"fileoff"] unsignedLongLongValue];
+        uint64_t segSize = [seg[@"vmsize"] unsignedLongLongValue];
+        if (offset + size > segSize) {
+            if (error) *error = [self err:[NSString stringWithFormat:@"fixup 0x%llx exceeds seg %@ in %@", offset, segName, _name]];
+            return 0;
+        }
+        return segFileOff + offset;
+    }
+    if (error) *error = [self err:[NSString stringWithFormat:@"unknown segment %@ in %@", segName, _name]];
+    return 0;
+}
+
+- (nullable NSData *)extractX86_64Slice:(NSData *)data name:(NSString *)name error:(NSError **)error
+{
+    const uint8_t *bytes = data.bytes;
+    if (data.length < sizeof(struct fat_header)) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: fat header too short", name]];
+        return nil;
+    }
+    const struct fat_header *fhdr = (const struct fat_header *)bytes;
+    uint32_t nfat = CFSwapInt32BigToHost(fhdr->nfat_arch);
+    const struct fat_arch *archs = (const struct fat_arch *)(bytes + sizeof(struct fat_header));
+
+    for (uint32_t i = 0; i < nfat; i++) {
+        if (CFSwapInt32BigToHost(archs[i].cputype) == CPU_TYPE_X86_64) {
+            uint32_t offset = CFSwapInt32BigToHost(archs[i].offset);
+            uint32_t size = CFSwapInt32BigToHost(archs[i].size);
+            if (offset + size > data.length) {
+                if (error) *error = [self err:[NSString stringWithFormat:@"%@: x86-64 slice exceeds input", name]];
+                return nil;
+            }
+            return [data subdataWithRange:NSMakeRange(offset, size)];
+        }
+    }
+    if (error) *error = [self err:[NSString stringWithFormat:@"%@: no x86-64 slice", name]];
+    return nil;
+}
+
+- (NSError *)err:(NSString *)msg
+{
+    return [NSError errorWithDomain:@"WFSSAPMachO" code:-1 userInfo:@{NSLocalizedDescriptionKey: msg}];
+}
+
 @end
 
+#pragma mark - Machine
+
 @interface WFSSAPMachine ()
-@property (nonatomic, strong) WFSUnicornAPI unicorn;
+@property (nonatomic, assign) WFSUnicornAPI unicorn;
 @property (nonatomic, assign) uc_engine engine;
 @property (nonatomic, strong) WFSSAPMachOImage *coreFPImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceCoreImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceKitImage;
-@property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *coreFPExports;
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *resolvedEntries;
 @property (nonatomic, assign) uint64_t scratchCursor;
 @property (nonatomic, assign) BOOL closed;
-@property (nonatomic, assign) uint64_t shimMacAddress;
 @end
 
 @implementation WFSSAPMachine
@@ -86,371 +330,94 @@ static NSString *const kEntryNames[] = {
     if (!self) return nil;
 
     if (wfs_unicorn_load(&_unicorn) != 0) {
-        if (error) *error = [self error:@"Failed to load Unicorn library. Install libunicorn.dylib."];
+        if (error) *error = [self machineError:@"Failed to load Unicorn. Install libunicorn.dylib."];
         return nil;
     }
 
     uint32_t major = 0, minor = 0;
     _unicorn.version(&major, &minor);
-    if (major != 2 || minor < 1) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"Unicorn API version %d.%d unsupported (need 2.1+)", major, minor]];
-        return nil;
-    }
 
     int rc = _unicorn.open(UC_ARCH_X86, UC_MODE_64, &_engine);
     if (rc != 0) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"uc_open failed: %s", _unicorn.strerror(rc)]];
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"uc_open: %s", _unicorn.strerror(rc)]];
         return nil;
     }
 
     BOOL ready = NO;
     @try {
-        _coreFPImage = [self openImage:@"CoreFP" data:coreFPData error:error];
+        _coreFPImage = [[WFSSAPMachOImage alloc] initWithName:@"CoreFP" data:coreFPData error:error];
         if (!_coreFPImage) return nil;
 
-        _commerceCoreImage = [self openImage:@"CommerceCore" data:commerceCoreData error:error];
+        _commerceCoreImage = [[WFSSAPMachOImage alloc] initWithName:@"CommerceCore" data:commerceCoreData error:error];
         if (!_commerceCoreImage) return nil;
 
-        _commerceKitImage = [self openImage:@"CommerceKit" data:commerceKitData error:error];
+        _commerceKitImage = [[WFSSAPMachOImage alloc] initWithName:@"CommerceKit" data:commerceKitData error:error];
         if (!_commerceKitImage) return nil;
 
         NSMutableDictionary *allExports = [NSMutableDictionary dictionary];
-        NSMutableDictionary *coreExports = [NSMutableDictionary dictionary];
+        NSMutableDictionary *entries = [NSMutableDictionary dictionary];
 
         for (NSString *name in [NSArray arrayWithObjects:kCoreFPExportNames count:sizeof(kCoreFPExportNames)/sizeof(kCoreFPExportNames[0])]) {
-            uint64_t addr = [_coreFPImage exportAddress:name loadBase:kCoreFPBase error:error];
-            if (addr == 0) return nil;
-            coreExports[name] = @(addr);
-            allExports[name] = @(addr);
+            NSNumber *addr = [_coreFPImage exportAddress:name loadBase:kCoreFPBase error:error];
+            if (!addr) return nil;
+            allExports[name] = addr;
         }
-
-        _coreFPExports = coreExports;
 
         {
-            uint64_t addr = [_commerceCoreImage exportAddress:@"_get_mac_address" loadBase:kCommerceBase error:error];
-            if (addr == 0) return nil;
-            allExports[@"_get_mac_address"] = @(addr);
-            _shimMacAddress = addr;
+            NSNumber *addr = [_commerceCoreImage exportAddress:@"_get_mac_address" loadBase:kCommerceBase error:error];
+            if (!addr) return nil;
+            allExports[@"_get_mac_address"] = addr;
         }
 
-        NSMutableDictionary *entries = [NSMutableDictionary dictionary];
         for (NSString *name in [NSArray arrayWithObjects:kEntryNames count:sizeof(kEntryNames)/sizeof(kEntryNames[0])]) {
-            uint64_t addr = [_commerceKitImage exportAddress:name loadBase:kKitBase error:error];
-            if (addr == 0) return nil;
-            allExports[name] = @(addr);
-            entries[name] = @(addr);
+            NSNumber *addr = [_commerceKitImage exportAddress:name loadBase:kKitBase error:error];
+            if (!addr) return nil;
+            allExports[name] = addr;
+            entries[name] = addr;
         }
         _resolvedEntries = entries;
 
-        [self mapRegions];
+        [self mapMemory];
 
         uint8_t hlt = 0xF4;
-        [self memWrite:kReturnAddress data:&hlt size:1];
+        _unicorn.memWrite(_engine, kReturnAddress, &hlt, 1);
 
-        [_coreFPImage relocate:kCoreFPBase resolver:^uint64_t(NSString *name) {
-            NSNumber *addr = allExports[name];
-            return addr ? addr.unsignedLongLongValue : 0;
+        [_coreFPImage relocate:kCoreFPBase resolver:^uint64_t(NSString *n) {
+            NSNumber *a = allExports[n];
+            return a ? a.unsignedLongLongValue : 0;
         } error:error];
-        if (*error) return nil;
+        if (error && *error) return nil;
 
-        [_commerceCoreImage relocate:kCommerceBase resolver:^uint64_t(NSString *name) {
-            NSNumber *addr = allExports[name];
-            return addr ? addr.unsignedLongLongValue : 0;
+        [_commerceCoreImage relocate:kCommerceBase resolver:^uint64_t(NSString *n) {
+            NSNumber *a = allExports[n];
+            return a ? a.unsignedLongLongValue : 0;
         } error:error];
-        if (*error) return nil;
+        if (error && *error) return nil;
 
-        [_commerceKitImage relocate:kKitBase resolver:^uint64_t(NSString *name) {
-            NSNumber *addr = allExports[name];
-            return addr ? addr.unsignedLongLongValue : 0;
+        [_commerceKitImage relocate:kKitBase resolver:^uint64_t(NSString *n) {
+            NSNumber *a = allExports[n];
+            return a ? a.unsignedLongLongValue : 0;
         } error:error];
-        if (*error) return nil;
+        if (error && *error) return nil;
 
-        [self loadImage:_coreFPImage error:error];
-        if (*error) return nil;
-        [self loadImage:_commerceCoreImage error:error];
-        if (*error) return nil;
-        [self loadImage:_commerceKitImage error:error];
-        if (*error) return nil;
+        [_coreFPImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        if (error && *error) return nil;
+        [_commerceCoreImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        if (error && *error) return nil;
+        [_commerceKitImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        if (error && *error) return nil;
 
         ready = YES;
     } @finally {
-        if (!ready) {
-            [self close];
-        }
+        if (!ready) [self close];
     }
 
     return self;
 }
 
-#pragma mark - Mach-O Parsing
+#pragma mark - Memory
 
-- (nullable WFSSAPMachOImage *)openImage:(NSString *)name data:(NSData *)data error:(NSError **)error
-{
-    const uint8_t *bytes = data.bytes;
-    NSUInteger length = data.length;
-
-    if (length < sizeof(uint32_t)) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"%@: data too short", name]];
-        return nil;
-    }
-
-    uint32_t magic = *(const uint32_t *)bytes;
-    NSData *sliceData = data;
-
-    if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
-        sliceData = [self extractX86_64Slice:data name:name error:error];
-        if (!sliceData) return nil;
-        bytes = sliceData.bytes;
-        length = sliceData.length;
-        magic = *(const uint32_t *)bytes;
-    }
-
-    if (magic != MH_MAGIC_64) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"%@: not an x86-64 Mach-O (magic=0x%x)", name, magic]];
-        return nil;
-    }
-
-    const struct mach_header_64 *hdr = (const struct mach_header_64 *)bytes;
-    WFSSAPMachOImage *image = [[WFSSAPMachOImage alloc] init];
-    image.name = name;
-    image.data = sliceData;
-    image.base = hdr->reserved;
-
-    NSMutableArray *segments = [NSMutableArray array];
-    NSMutableArray *rebases = [NSMutableArray array];
-    NSMutableArray *binds = [NSMutableArray array];
-    NSMutableDictionary *exports = [NSMutableDictionary dictionary];
-
-    const uint8_t *cmd = bytes + sizeof(struct mach_header_64);
-    uint32_t ncmds = hdr->ncmds;
-
-    for (uint32_t i = 0; i < ncmds; i++) {
-        const struct load_command *lc = (const struct load_command *)cmd;
-
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *seg = (const struct segment_command_64 *)cmd;
-
-            NSDictionary *segInfo = @{
-                @"name": @(seg->segname),
-                @"vmaddr": @(seg->vmaddr),
-                @"vmsize": @(seg->vmsize),
-                @"fileoff": @(seg->fileoff),
-                @"filesize": @(seg->filesize),
-            };
-            [segments addObject:segInfo];
-
-            const struct section_64 *sec = (const struct section_64 *)(cmd + sizeof(struct segment_command_64));
-            uint32_t nsects = (seg->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64);
-
-            for (uint32_t j = 0; j < nsects; j++) {
-                uint32_t secType = sec[j].flags & SECTION_TYPE;
-
-                if (secType == S_LAZY_SYMBOL_POINTERS || secType == S_NON_LAZY_SYMBOL_POINTERS) {
-                    uint64_t secAddr = sec[j].addr;
-                    uint64_t secSize = sec[j].size;
-                    uint64_t secOff = sec[j].offset;
-                    uint64_t ptrCount = secSize / 8;
-
-                    for (uint64_t k = 0; k < ptrCount; k++) {
-                        uint64_t entryOff = secOff + k * 8;
-                        [rebases addObject:@{
-                            @"segment": @(seg->segname),
-                            @"offset": @(secAddr - seg->vmaddr + k * 8),
-                            @"fileOffset": @(entryOff),
-                        }];
-                    }
-                }
-            }
-        }
-
-        if (lc->cmd == LC_DYSYMTAB) {
-            const struct dysymtab_info *dysymtab = (const struct dysymtab_info *)cmd;
-            const uint8_t *symbytes = bytes;
-
-            uint32_t *indirectSymtab = (uint32_t *)(symbytes + dysymtab->indirectsymoff);
-            uint32_t nIndirectSyms = dysymtab->nindirectsyms;
-
-            for (uint32_t j = 0; j < nIndirectSyms; j++) {
-                uint32_t symIdx = indirectSymtab[j];
-                (void)symIdx;
-            }
-        }
-
-        if (lc->cmd == LC_SYMTAB) {
-            const struct symtab_info *symtab = (const struct symtab_info *)cmd;
-            const uint8_t *strtab = bytes + symtab->stroff;
-            const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtab->symoff);
-
-            for (uint32_t j = 0; j < symtab->nsyms; j++) {
-                if (syms[j].n_value == 0) continue;
-                if (syms[j].n_type & N_STAB) continue;
-
-                const char *symName = (const char *)(strtab + syms[j].n_un.n_strx);
-                if (symName[0] != '_') continue;
-
-                exports[@(symName)] = @(syms[j].n_value);
-            }
-        }
-
-        cmd += lc->cmdsize;
-    }
-
-    image.segments = segments;
-    image.rebases = rebases;
-    image.binds = binds;
-    image.exports = exports;
-
-    return image;
-}
-
-- (nullable NSData *)extractX86_64Slice:(NSData *)data name:(NSString *)name error:(NSError **)error
-{
-    const uint8_t *bytes = data.bytes;
-    NSUInteger length = data.length;
-
-    if (length < sizeof(struct fat_header)) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"%@: fat header too short", name]];
-        return nil;
-    }
-
-    const struct fat_header *fhdr = (const struct fat_header *)bytes;
-    uint32_t nfat = CFSwapInt32BigToHost(fhdr->nfat_arch);
-
-    const struct fat_arch *archs = (const struct fat_arch *)(bytes + sizeof(struct fat_header));
-
-    for (uint32_t i = 0; i < nfat; i++) {
-        uint32_t cputype = CFSwapInt32BigToHost(archs[i].cputype);
-        if (cputype == CPU_TYPE_X86_64) {
-            uint32_t offset = CFSwapInt32BigToHost(archs[i].offset);
-            uint32_t size = CFSwapInt32BigToHost(archs[i].size);
-
-            if (offset + size > length) {
-                if (error) *error = [self error:[NSString stringWithFormat:@"%@: x86-64 slice exceeds input", name]];
-                return nil;
-            }
-
-            return [data subdataWithRange:NSMakeRange(offset, size)];
-        }
-    }
-
-    if (error) *error = [self error:[NSString stringWithFormat:@"%@: no x86-64 slice found", name]];
-    return nil;
-}
-
-- (nullable NSNumber *)exportAddress:(NSString *)name loadBase:(uint64_t)loadBase error:(NSError **)error
-{
-    NSNumber *addr = self.exports[name];
-    if (!addr) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"symbol %@ not found in %@", name, self.name]];
-        return nil;
-    }
-
-    uint64_t symbolAddr = addr.unsignedLongLongValue;
-    if (symbolAddr < self.base) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"symbol %@ in %@ precedes base", name, self.name]];
-        return nil;
-    }
-
-    return @(loadBase + (symbolAddr - self.base));
-}
-
-- (void)relocate:(uint64_t)loadBase resolver:(uint64_t(^)(NSString *))resolver error:(NSError **)error
-{
-    if (self.relocated) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"%@ already relocated", self.name]];
-        return;
-    }
-
-    for (NSDictionary *rebase in self.rebases) {
-        NSString *segName = rebase[@"segment"];
-        uint64_t offset = [rebase[@"offset"] unsignedLongLongValue];
-
-        uint64_t fileOff = [self fileOffsetForSegment:segName offset:offset size:8 error:error];
-        if (error && *error) return;
-
-        uint64_t pointer = 0;
-        memcpy(&pointer, self.data.bytes + fileOff, 8);
-        uint64_t newAddr = loadBase + (pointer - self.base);
-
-        uint8_t *mutable = (uint8_t *)self.data.mutableBytes;
-        memcpy(mutable + fileOff, &newAddr, 8);
-    }
-
-    self.relocated = YES;
-    self.loadedBase = loadBase;
-}
-
-- (uint64_t)fileOffsetForSegment:(NSString *)segName offset:(uint64_t)offset size:(uint64_t)size error:(NSError **)error
-{
-    for (NSDictionary *seg in self.segments) {
-        if (![seg[@"name"] isEqualToString:segName]) continue;
-
-        uint64_t segAddr = [seg[@"vmaddr"] unsignedLongLongValue];
-        uint64_t segFileOff = [seg[@"fileoff"] unsignedLongLongValue];
-        uint64_t segSize = [seg[@"vmsize"] unsignedLongLongValue];
-
-        if (offset + size > segSize) {
-            if (error) *error = [self error:[NSString stringWithFormat:@"fixup at 0x%llx exceeds segment %@ in %@", offset, segName, self.name]];
-            return 0;
-        }
-
-        return segFileOff + offset;
-    }
-
-    if (error) *error = [self error:[NSString stringWithFormat:@"unknown segment %@ in %@", segName, self.name]];
-    return 0;
-}
-
-- (void)loadImage:(WFSSAPMachOImage *)image error:(NSError **)error
-{
-    uint64_t span = 0;
-
-    for (NSDictionary *seg in image.segments) {
-        NSString *segName = seg[@"name"];
-        if ([segName isEqualToString:@"__PAGEZERO"]) continue;
-
-        uint64_t segAddr = [seg[@"vmaddr"] unsignedLongLongValue];
-        uint64_t segSize = [seg[@"vmsize"] unsignedLongLongValue];
-        if (segSize == 0) continue;
-
-        uint64_t end = (segAddr - image.base) + segSize;
-        if (end > span) span = end;
-    }
-
-    span = (span + kPageSize - 1) & ~(kPageSize - 1);
-    if (span == 0) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"%@: no loadable segments", image.name]];
-        return;
-    }
-
-    int rc = _unicorn.memMap(_engine, image.loadedBase, span, UC_PROT_ALL);
-    if (rc != 0) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"memMap failed for %@: %s", image.name, _unicorn.strerror(rc)]];
-        return;
-    }
-
-    for (NSDictionary *seg in image.segments) {
-        NSString *segName = seg[@"name"];
-        if ([segName isEqualToString:@"__PAGEZERO"]) continue;
-
-        uint64_t fileSize = [seg[@"filesize"] unsignedLongLongValue];
-        if (fileSize == 0) continue;
-
-        uint64_t segAddr = [seg[@"vmaddr"] unsignedLongLongValue];
-        uint64_t segFileOff = [seg[@"fileoff"] unsignedLongLongValue];
-        uint64_t destAddr = image.loadedBase + (segAddr - image.base);
-
-        rc = _unicorn.memWrite(_engine, destAddr, image.data.bytes + segFileOff, fileSize);
-        if (rc != 0) {
-            if (error) *error = [self error:[NSString stringWithFormat:@"memWrite failed for %@ segment %@: %s", image.name, segName, _unicorn.strerror(rc)]];
-            return;
-        }
-    }
-}
-
-#pragma mark - Memory Helpers
-
-- (void)mapRegions
+- (void)mapMemory
 {
     struct { uint64_t addr; uint64_t size; } regions[] = {
         {kReturnAddress, kPageSize},
@@ -458,22 +425,9 @@ static NSString *const kEntryNames[] = {
         {kHeapBase, kHeapSize},
         {kStackBase, kStackSize},
     };
-
     for (size_t i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
         _unicorn.memMap(_engine, regions[i].addr, regions[i].size, UC_PROT_ALL);
     }
-}
-
-- (void)memWrite:(uint64_t)address data:(const void *)data size:(uint64_t)size
-{
-    _unicorn.memWrite(_engine, address, data, size);
-}
-
-- (NSData *)memRead:(uint64_t)address size:(uint64_t)size
-{
-    NSMutableData *data = [NSMutableData dataWithLength:size];
-    _unicorn.memRead(_engine, address, data.mutableBytes, size);
-    return data;
 }
 
 - (uint64_t)scratchReserve:(uint64_t)size
@@ -482,49 +436,33 @@ static NSString *const kEntryNames[] = {
     if (_scratchCursor + reserved > kScratchSize) return 0;
     uint64_t addr = kScratchBase + _scratchCursor;
     _scratchCursor += reserved;
+    if (size > 0) {
+        void *zero = calloc(1, (size_t)reserved);
+        _unicorn.memWrite(_engine, addr, zero, reserved);
+        free(zero);
+    }
     return addr;
 }
 
 - (uint64_t)scratchWrite:(const void *)data size:(uint64_t)size
 {
     uint64_t addr = [self scratchReserve:size];
-    if (addr && data && size) {
-        _unicorn.memWrite(_engine, addr, data, size);
-    } else if (addr && size) {
-        void *zero = calloc(1, (size_t)size);
-        _unicorn.memWrite(_engine, addr, zero, size);
-        free(zero);
-    }
+    if (addr && data && size) _unicorn.memWrite(_engine, addr, data, size);
     return addr;
-}
-
-- (uint64_t)scratchUint64Field
-{
-    return [self scratchReserve:8];
-}
-
-- (void)clearScratch
-{
-    if (_scratchCursor > 0) {
-        void *zero = calloc(1, (size_t)_scratchCursor);
-        _unicorn.memWrite(_engine, kScratchBase, zero, _scratchCursor);
-        free(zero);
-    }
-    _scratchCursor = 0;
 }
 
 - (uint64_t)readUint64:(uint64_t)address
 {
-    uint64_t value = 0;
-    _unicorn.memRead(_engine, address, &value, 8);
-    return value;
+    uint64_t v = 0;
+    _unicorn.memRead(_engine, address, &v, 8);
+    return v;
 }
 
 - (uint32_t)readUint32:(uint64_t)address
 {
-    uint32_t value = 0;
-    _unicorn.memRead(_engine, address, &value, 4);
-    return value;
+    uint32_t v = 0;
+    _unicorn.memRead(_engine, address, &v, 4);
+    return v;
 }
 
 - (void)writeUint64:(uint64_t)address value:(uint64_t)value
@@ -532,44 +470,43 @@ static NSString *const kEntryNames[] = {
     _unicorn.memWrite(_engine, address, &value, 8);
 }
 
-#pragma mark - Function Invocation
+- (NSData *)consumeOutput:(uint64_t)ptrField lengthField:(uint64_t)lenField
+{
+    uint64_t ptr = [self readUint64:ptrField];
+    uint64_t len = [self readUint64:lenField];
+    if (len > kMaxOutputSize || ptr == 0) return nil;
+    NSMutableData *out = [NSMutableData dataWithLength:len];
+    _unicorn.memRead(_engine, ptr, out.mutableBytes, len);
+    uint64_t mapped = (len + kPageSize - 1) & ~(kPageSize - 1);
+    _unicorn.memUnmap(_engine, ptr, mapped);
+    return out;
+}
+
+#pragma mark - Invocation
 
 - (uint64_t)invoke:(uint64_t)function args:(uint64_t[])args count:(int)count
 {
     if (_closed || function == 0) return 0;
 
-    int regs[] = {
-        UC_X86_REG_RDI,
-        UC_X86_REG_RSI,
-        UC_X86_REG_RDX,
-        UC_X86_REG_RCX,
-        UC_X86_REG_R8,
-        UC_X86_REG_R9,
-    };
-
-    int regCount = sizeof(regs) / sizeof(regs[0]);
+    int regs[] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX, UC_X86_REG_RCX, UC_X86_REG_R8, UC_X86_REG_R9};
+    int regCount = 6;
     int stackArgs = count > regCount ? count - regCount : 0;
 
     uint64_t stackPtr = kStackBase + kStackSize - (stackArgs + 1) * 8;
     if (stackPtr % 16 != 8) stackPtr -= 8;
 
     [self writeUint64:stackPtr value:kReturnAddress];
-
     for (int i = 0; i < stackArgs; i++) {
         [self writeUint64:stackPtr + 8 + i * 8 value:args[regCount + i]];
     }
-
     for (int i = 0; i < regCount; i++) {
         uint64_t val = (i < count) ? args[i] : 0;
         _unicorn.regWrite(_engine, regs[i], &val);
     }
-
     _unicorn.regWrite(_engine, UC_X86_REG_RSP, &stackPtr);
 
     int rc = _unicorn.emuStart(_engine, function, kReturnAddress, kSAPGuestTimeout * 1000000ULL, 0);
-    if (rc != 0) {
-        return 0;
-    }
+    if (rc != 0) return 0;
 
     uint64_t rip = 0;
     _unicorn.regRead(_engine, UC_X86_REG_RIP, &rip);
@@ -580,57 +517,35 @@ static NSString *const kEntryNames[] = {
     return rax;
 }
 
-- (NSData *)consumeOutput:(uint64_t)pointerField lengthField:(uint64_t)lengthField
+- (NSData *)hardwareBlock:(NSData *)hw
 {
-    uint64_t ptr = [self readUint64:pointerField];
-    uint64_t len = [self readUint64:lengthField];
-
-    if (len > kMaxOutputSize || ptr == 0) return nil;
-
-    NSData *output = [self memRead:ptr size:len];
-
-    _unicorn.memUnmap(_engine, ptr, (len + kPageSize - 1) & ~(kPageSize - 1));
-
-    return output;
-}
-
-#pragma mark - Hardware ID
-
-- (NSData *)hardwareBlock:(NSData *)hardwareID
-{
-    uint32_t len = (uint32_t)hardwareID.length;
+    uint32_t len = (uint32_t)hw.length;
     NSMutableData *block = [NSMutableData dataWithLength:24];
     [block replaceBytesInRange:NSMakeRange(0, 4) withBytes:&len];
-    [block replaceBytesInRange:NSMakeRange(4, len) withBytes:hardwareID.bytes];
+    [block replaceBytesInRange:NSMakeRange(4, len) withBytes:hw.bytes];
     return block;
 }
 
-#pragma mark - Public API
+#pragma mark - Public
 
 - (nullable NSNumber *)initializeWithHardwareID:(NSData *)hardwareID error:(NSError **)error
 {
     _scratchCursor = 0;
-
-    NSData *hwBlock = [self hardwareBlock:hardwareID];
-    uint64_t contextField = [self scratchUint64Field];
-    uint64_t hwAddr = [self scratchWrite:hwBlock.bytes size:hwBlock.length];
-
-    uint64_t args[] = {contextField, hwAddr};
+    NSData *hw = [self hardwareBlock:hardwareID];
+    uint64_t ctxField = [self scratchReserve:8];
+    uint64_t hwAddr = [self scratchWrite:hw.bytes size:hw.length];
+    uint64_t args[] = {ctxField, hwAddr};
     uint64_t status = [self invoke:[_resolvedEntries[@"_cp2g1b9ro"] unsignedLongLongValue] args:args count:2];
-
-    [self clearScratch];
-
+    _scratchCursor = 0;
     if ((int32_t)status != 0) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"SAP initialize returned %d", (int32_t)status]];
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"SAP initialize returned %d", (int32_t)status]];
         return nil;
     }
-
-    uint64_t ctx = [self readUint64:contextField];
+    uint64_t ctx = [self readUint64:ctxField];
     if (ctx == 0) {
-        if (error) *error = [self error:@"SAP initialize returned null context"];
+        if (error) *error = [self machineError:@"SAP initialize returned null context"];
         return nil;
     }
-
     return @(ctx);
 }
 
@@ -641,106 +556,78 @@ static NSString *const kEntryNames[] = {
                                          error:(NSError **)error
 {
     _scratchCursor = 0;
-
-    NSData *hwBlock = [self hardwareBlock:hardwareID];
-    uint64_t hwAddr = [self scratchWrite:hwBlock.bytes size:hwBlock.length];
+    NSData *hw = [self hardwareBlock:hardwareID];
+    uint64_t hwAddr = [self scratchWrite:hw.bytes size:hw.length];
     uint64_t inputAddr = [self scratchWrite:input.bytes size:input.length];
-    uint64_t outputField = [self scratchUint64Field];
-    uint64_t lengthField = [self scratchUint64Field];
-    uint64_t resultField = [self scratchReserve:4];
-
-    uint64_t args[] = {version, hwAddr, context, inputAddr, (uint64_t)input.length, outputField, lengthField, resultField};
+    uint64_t outField = [self scratchReserve:8];
+    uint64_t lenField = [self scratchReserve:8];
+    uint64_t resField = [self scratchReserve:4];
+    uint64_t args[] = {version, hwAddr, context, inputAddr, (uint64_t)input.length, outField, lenField, resField};
     uint64_t status = [self invoke:[_resolvedEntries[@"_Mib5yocT"] unsignedLongLongValue] args:args count:8];
-
     if ((int32_t)status != 0) {
-        [self clearScratch];
-        if (error) *error = [self error:[NSString stringWithFormat:@"SAP exchange returned %d", (int32_t)status]];
+        _scratchCursor = 0;
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"SAP exchange returned %d", (int32_t)status]];
         return nil;
     }
-
-    NSData *output = [self consumeOutput:outputField lengthField:lengthField];
-    uint32_t result = [self readUint32:resultField];
-
-    [self clearScratch];
-
+    NSData *output = [self consumeOutput:outField lengthField:lenField];
+    uint32_t result = [self readUint32:resField];
+    _scratchCursor = 0;
     return @{@"output": output ?: [NSData data], @"state": @(result)};
 }
 
 - (nullable NSData *)signWithContext:(uint64_t)context input:(NSData *)input error:(NSError **)error
 {
     _scratchCursor = 0;
-
     uint64_t inputAddr = [self scratchWrite:input.bytes size:input.length];
-    uint64_t outputField = [self scratchUint64Field];
-    uint64_t lengthField = [self scratchUint64Field];
-
-    uint64_t args[] = {context, inputAddr, (uint64_t)input.length, outputField, lengthField};
+    uint64_t outField = [self scratchReserve:8];
+    uint64_t lenField = [self scratchReserve:8];
+    uint64_t args[] = {context, inputAddr, (uint64_t)input.length, outField, lenField};
     uint64_t status = [self invoke:[_resolvedEntries[@"_Fc3vhtJDvr"] unsignedLongLongValue] args:args count:5];
-
     if ((int32_t)status != 0) {
-        [self clearScratch];
-        if (error) *error = [self error:[NSString stringWithFormat:@"SAP sign returned %d", (int32_t)status]];
+        _scratchCursor = 0;
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"SAP sign returned %d", (int32_t)status]];
         return nil;
     }
-
-    NSData *output = [self consumeOutput:outputField lengthField:lengthField];
-
-    [self clearScratch];
-
+    NSData *output = [self consumeOutput:outField lengthField:lenField];
+    _scratchCursor = 0;
     if (!output.length) {
-        if (error) *error = [self error:@"SAP sign returned empty signature"];
+        if (error) *error = [self machineError:@"SAP sign returned empty"];
         return nil;
     }
-
     return output;
 }
 
 - (BOOL)teardownWithContext:(uint64_t)context error:(NSError **)error
 {
     _scratchCursor = 0;
-
     uint64_t args[] = {context};
     uint64_t status = [self invoke:[_resolvedEntries[@"_IPaI1oem5iL"] unsignedLongLongValue] args:args count:1];
-
-    [self clearScratch];
-
+    _scratchCursor = 0;
     if ((int32_t)status != 0) {
-        if (error) *error = [self error:[NSString stringWithFormat:@"SAP teardown returned %d", (int32_t)status]];
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"SAP teardown returned %d", (int32_t)status]];
         return NO;
     }
-
     return YES;
 }
 
 - (nullable NSString *)macAddress
 {
-    if (_shimMacAddress == 0) return nil;
     return @"02:00:00:00:00:00";
 }
-
-#pragma mark - Cleanup
 
 - (void)close
 {
     if (_closed) return;
     _closed = YES;
-
-    if (_engine) {
-        _unicorn.close(_engine);
-        _engine = NULL;
-    }
-
+    if (_engine) { _unicorn.close(_engine); _engine = NULL; }
     wfs_unicorn_unload(&_unicorn);
 }
 
-- (void)dealloc
-{
-    [self close];
-}
+- (void)dealloc { [self close]; }
 
-- (NSError *)error:(NSString *)message
+- (NSError *)machineError:(NSString *)msg
 {
-    return [NSError errorWithDomain:@"WFSSAPMachine" code:-1 userInfo:@{NSLocalizedDescriptionKey: message}];
+    return [NSError errorWithDomain:@"WFSSAPMachine" code:-1 userInfo:@{NSLocalizedDescriptionKey: msg}];
 }
 
 @end
