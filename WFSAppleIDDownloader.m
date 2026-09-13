@@ -6,11 +6,11 @@ NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDom
 static NSString* const kWFSConfiguratorUA = @"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
 static NSString* const kWFSStoreElementsUA = @"Configurator/2.17 (Macintosh; macOS 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
 static NSString* const kWFSCommerceUA = @"Configurator/2.18 (Macintosh; OS X 15.3.2; 24D81) AppleWebKit/0620.2.4.11.6";
-static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/auth/v1/native/fast/";
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
 static NSString* const kWFSAnisetteEndpoint = @"https://ani.sidestore.io/";
 static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
+static NSString* const kWFSSAPActionSignatureHeader = @"X-Apple-ActionSignature";
 
 static NSString* const kWFSFailureTypeInvalidCredentials = @"-5000";
 static NSString* const kWFSFailureTypePasswordTokenExpired = @"2034";
@@ -47,6 +47,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, copy) NSString* guid;
 @property (nonatomic, copy) NSString* appleId;
 @property (nonatomic, copy) NSString* password;
+@property (nonatomic, copy) NSString* authCode;
 @property (nonatomic, copy) NSString* dsid;
 @property (nonatomic, copy) NSString* token;
 @property (nonatomic, copy) NSString* storeFront;
@@ -58,6 +59,10 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, copy) NSDictionary* anisetteHeaders;
 @property (nonatomic, copy) NSString* lastAuthEndpoint;
 @property (nonatomic, copy) NSString* lastDownloadEndpoint;
+@property (nonatomic, copy) NSString* sapSetupURL;
+@property (nonatomic, copy) NSString* sapCertificateURL;
+@property (nonatomic, assign) uint32_t sapVersion;
+@property (nonatomic, strong) id<WFSSAPActionSigner> sapSigner;
 @end
 
 @implementation WFSAppleIDDownloader
@@ -116,7 +121,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		return;
 	}
 	NSString* sanitizedCode = [(code ?: @"") stringByReplacingOccurrencesOfString:@" " withString:@""];
-	self.password = [NSString stringWithFormat:@"%@%@", self.password, sanitizedCode];
+	self.authCode = sanitizedCode;
 	self.twoFactorCodeSent = YES;
 	[self tryAuthenticateWithAttempt:1 completion:completion];
 }
@@ -136,6 +141,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	[self resetSessionState];
 	self.appleId = nil;
 	self.password = nil;
+	self.authCode = nil;
 	self.authenticatedAppleId = nil;
 	self.guid = nil;
 }
@@ -933,23 +939,59 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		{
 			[diagnostics addObject:@"ani.sidestore.io: anisette unavailable, continuing without"];
 		}
-		[self resolveFastAuthEndpoint:^(NSString* resolvedEndpoint)
+		[self resolveSAPConfiguration:^(NSDictionary* sapConfig)
 		{
-			if (resolvedEndpoint.length)
+			if (sapConfig)
 			{
-				[diagnostics addObject:[NSString stringWithFormat:@"bag.xml -> %@", resolvedEndpoint]];
+				NSString* authEndpoint = sapConfig[@"authenticateAccount"];
+				NSString* setupURL = sapConfig[@"sign-sap-setup"];
+				NSString* certURL = sapConfig[@"sign-sap-setup-cert"];
+				NSString* versionStr = sapConfig[@"sign-sap-version"];
+
+				if (authEndpoint.length)
+				{
+					[diagnostics addObject:[NSString stringWithFormat:@"bag -> authenticateAccount: %@", authEndpoint]];
+				}
+				if (setupURL.length)
+				{
+					[diagnostics addObject:[NSString stringWithFormat:@"bag -> sign-sap-setup: %@", setupURL]];
+				}
+				if (certURL.length)
+				{
+					[diagnostics addObject:[NSString stringWithFormat:@"bag -> sign-sap-setup-cert: %@", certURL]];
+				}
+				if (versionStr.length)
+				{
+					[diagnostics addObject:[NSString stringWithFormat:@"bag -> sign-sap-version: %@", versionStr]];
+				}
+
+				self.sapSetupURL = setupURL;
+				self.sapCertificateURL = certURL;
+				self.sapVersion = (uint32_t)[versionStr intValue];
+
+				if (setupURL.length && certURL.length && self.guid.length)
+				{
+					[self initializeSAPSignerWithSetupURL:setupURL
+										 certificateURL:certURL
+											   version:self.sapVersion
+										   diagnostics:diagnostics];
+				}
 			}
 			else
 			{
-				[diagnostics addObject:@"bag.xml: no authenticateAccount key, using built-in endpoints"];
+				[diagnostics addObject:@"bag.xml: no SAP config found, using built-in endpoints"];
+			}
+			NSString* authEndpoint = sapConfig[@"authenticateAccount"];
+			if (!authEndpoint.length)
+			{
+				authEndpoint = kWFSLegacyAuthEndpoint;
 			}
 			NSMutableArray* candidates = [NSMutableArray array];
 			[candidates addObject:kWFSLegacyAuthEndpoint];
-			if (resolvedEndpoint.length)
+			if (authEndpoint.length && ![authEndpoint isEqualToString:kWFSLegacyAuthEndpoint])
 			{
-				[candidates addObject:resolvedEndpoint];
+				[candidates addObject:authEndpoint];
 			}
-			[candidates addObject:kWFSFastAuthEndpoint];
 			[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt retryCount:0 diagnostics:diagnostics completion:completion];
 		}];
 	}];
@@ -992,7 +1034,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}] resume];
 }
 
-- (void)resolveFastAuthEndpoint:(void (^)(NSString* endpoint))completion
+- (void)resolveSAPConfiguration:(void (^)(NSDictionary* sapConfig))completion
 {
 	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:kWFSInitBagEndpoint, self.guid]];
 	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
@@ -1006,24 +1048,42 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			return;
 		}
 		NSDictionary* bag = [self parsePlistResponse:data];
-		NSString* endpoint = nil;
+		NSMutableDictionary* sapConfig = nil;
 		if ([bag isKindOfClass:[NSDictionary class]])
 		{
-			endpoint = [self stringForKey:@"authenticateAccount" in:bag];
-			if (!endpoint.length)
+			NSDictionary* urlBag = bag[@"urlBag"];
+			if (![urlBag isKindOfClass:[NSDictionary class]])
 			{
-				NSDictionary* urlBag = bag[@"urlBag"];
-				if ([urlBag isKindOfClass:[NSDictionary class]])
+				urlBag = bag;
+			}
+
+			NSString* authEndpoint = [self stringForKey:@"authenticateAccount" in:urlBag];
+			NSString* setupURL = [self stringForKey:@"sign-sap-setup" in:urlBag];
+			NSString* certURL = [self stringForKey:@"sign-sap-setup-cert" in:urlBag];
+			NSString* versionStr = [self stringForKey:@"sign-sap-version" in:urlBag];
+
+			if (authEndpoint.length || setupURL.length || certURL.length || versionStr.length)
+			{
+				sapConfig = [NSMutableDictionary dictionary];
+				if (authEndpoint.length)
 				{
-					endpoint = [self stringForKey:@"authenticateAccount" in:urlBag];
+					sapConfig[@"authenticateAccount"] = [self authenticateURLString:authEndpoint];
+				}
+				if (setupURL.length)
+				{
+					sapConfig[@"sign-sap-setup"] = setupURL;
+				}
+				if (certURL.length)
+				{
+					sapConfig[@"sign-sap-setup-cert"] = certURL;
+				}
+				if (versionStr.length)
+				{
+					sapConfig[@"sign-sap-version"] = versionStr;
 				}
 			}
-			if (endpoint.length)
-			{
-				endpoint = [self authenticateURLString:endpoint];
-			}
 		}
-		completion(endpoint);
+		completion(sapConfig);
 	}] resume];
 }
 
@@ -1038,6 +1098,43 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		return [endpoint stringByAppendingString:@"/"];
 	}
 	return endpoint;
+}
+
+- (void)initializeSAPSignerWithSetupURL:(NSString*)setupURL
+                         certificateURL:(NSString*)certURL
+                               version:(uint32_t)version
+                           diagnostics:(NSMutableArray*)diagnostics
+{
+	if (!setupURL.length || !certURL.length || !self.guid.length)
+	{
+		[diagnostics addObject:@"SAP: missing setup URL, certificate URL, or GUID"];
+		return;
+	}
+
+	NSData* hardwareID = [WFSSAPSigner hardwareIDFromGUID:self.guid];
+	if (!hardwareID.length)
+	{
+		[diagnostics addObject:@"SAP: failed to derive hardware ID from GUID"];
+		return;
+	}
+
+	WFSSAPConfig* config = [[WFSSAPConfig alloc] init];
+	config.setupURL = setupURL;
+	config.certificateURL = certURL;
+	config.version = version;
+	config.hardwareID = hardwareID;
+
+	NSError* signerError = nil;
+	id<WFSSAPActionSigner> signer = [WFSSAPSigner signerWithConfig:config error:&signerError];
+	if (signer)
+	{
+		self.sapSigner = signer;
+		[diagnostics addObject:@"SAP: signer initialized successfully"];
+	}
+	else
+	{
+		[diagnostics addObject:[NSString stringWithFormat:@"SAP: signer initialization failed: %@", signerError.localizedDescription ?: @"unknown error"]];
+	}
 }
 
 - (void)tryAuthEndpointCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
@@ -1062,9 +1159,14 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		return;
 	}
 	NSString* candidate = candidates[index % candidates.count];
+	NSString* combinedPassword = self.password;
+	if (self.authCode.length)
+	{
+		combinedPassword = [NSString stringWithFormat:@"%@%@", self.password, self.authCode];
+	}
 	NSDictionary* body = @{
 		@"appleId": self.appleId,
-		@"password": self.password,
+		@"password": combinedPassword,
 		@"attempt": [NSString stringWithFormat:@"%ld", (long)attempt],
 		@"guid": self.guid,
 		@"rmp": @"0",
@@ -1075,7 +1177,36 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)postAuthBody:(NSDictionary*)body toURLString:(NSString*)urlString attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount redirects:(NSInteger)redirects candidates:(NSArray*)candidates index:(NSUInteger)index diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
 {
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:self.anisetteHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	NSMutableDictionary* additionalHeaders = [NSMutableDictionary dictionary];
+	if (self.anisetteHeaders.count)
+	{
+		[additionalHeaders addEntriesFromDictionary:self.anisetteHeaders];
+	}
+
+	if (self.sapSigner)
+	{
+		NSError* signError = nil;
+		NSData* bodyData = [NSPropertyListSerialization dataWithPropertyList:body format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+		if (bodyData.length)
+		{
+			NSData* signature = [self.sapSigner sign:bodyData error:&signError];
+			if (signature.length)
+			{
+				NSString* base64Sig = [signature base64EncodedStringWithOptions:0];
+				if (base64Sig.length)
+				{
+					additionalHeaders[kWFSSAPActionSignatureHeader] = base64Sig;
+					[diagnostics addObject:[NSString stringWithFormat:@"SAP: ActionSignature header added (%lu bytes)", (unsigned long)signature.length]];
+				}
+			}
+			else
+			{
+				[diagnostics addObject:[NSString stringWithFormat:@"SAP: signing failed: %@", signError.localizedDescription ?: @"unknown error"]];
+			}
+		}
+	}
+
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:additionalHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -1861,9 +1992,18 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	self.storeFront = nil;
 	self.pod = nil;
 	self.twoFactorCodeSent = NO;
+	self.authCode = nil;
 	self.anisetteHeaders = nil;
 	self.lastAuthEndpoint = nil;
 	self.lastDownloadEndpoint = nil;
+	self.sapSetupURL = nil;
+	self.sapCertificateURL = nil;
+	self.sapVersion = 0;
+	if (self.sapSigner)
+	{
+		[self.sapSigner close];
+		self.sapSigner = nil;
+	}
 }
 
 - (void)finishVersions:(WFSAppleIDVersionsCompletion)completion versions:(NSArray*)versions metadata:(NSDictionary*)metadata error:(NSError*)error
