@@ -117,16 +117,19 @@ import Foundation
         return fn(eng)
     }
 
-    @objc func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64) -> UnsafeMutableRawPointer? {
-        guard let fn = _hookAdd, let eng = engine else { return nil }
+    @objc private(set) var lastHook: UInt64 = 0
+
+    @objc func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64) -> Int32 {
+        guard let fn = _hookAdd, let eng = engine else { return -1 }
         var hookPtr: UnsafeMutableRawPointer?
-        let _ = fn(eng, &hookPtr, type, callback, userData, begin, end)
-        return hookPtr
+        let rc = fn(eng, &hookPtr, type, callback, userData, begin, end)
+        lastHook = UInt64(bitPattern: hookPtr)
+        return rc
     }
 
-    @objc func hookDel(_ hook: UnsafeMutableRawPointer?) -> Int32 {
+    @objc func hookDel(_ hook: UInt64) -> Int32 {
         guard let fn = _hookDel, let eng = engine else { return -1 }
-        return fn(eng, hook)
+        return fn(eng, UnsafeMutableRawPointer(bitPattern: hook))
     }
 
     @objc func strerror(_ code: Int32) -> String {

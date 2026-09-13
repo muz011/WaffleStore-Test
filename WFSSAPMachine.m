@@ -394,6 +394,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *resolvedEntries;
 @property (nonatomic, assign) uint64_t scratchCursor;
 @property (nonatomic, assign) BOOL closed;
+@property (nonatomic, assign) uint64_t codeHook;
 @end
 
 @implementation WFSSAPMachine
@@ -479,7 +480,9 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
         }
 
         {
-            (void)[_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
+            int hookRc = [_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
+            _codeHook = _unicorn.lastHook;
+            (void)hookRc;
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {
@@ -725,7 +728,10 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     _closed = YES;
     [_shims close];
     _shims = nil;
-    if (_unicorn) { [_unicorn closeEngine]; _unicorn = nil; }
+    if (_unicorn) {
+        if (_codeHook) { [_unicorn hookDel:_codeHook]; _codeHook = 0; }
+        [_unicorn closeEngine]; _unicorn = nil;
+    }
 }
 
 - (void)dealloc { [self close]; }

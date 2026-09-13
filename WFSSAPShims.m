@@ -31,7 +31,6 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t _heapCursor;
     NSMutableDictionary<NSNumber *, WFSSAPShimEntry *> *_entries;
     NSMutableDictionary<NSString *, NSNumber *> *_symbols;
-    void *_hook;
 }
 @end
 
@@ -618,10 +617,6 @@ static const uint64_t kShimHeapSize = 16 << 20;
 
 - (void)close
 {
-    if (_hook) {
-        [_unicorn hookDel:_hook];
-        _hook = NULL;
-    }
 }
 
 - (void)dealloc
