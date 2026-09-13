@@ -1,4 +1,5 @@
 #import "WFSSAPShims.h"
+#import "WFSSwiftUnicorn-Swift.h"
 #import <mach-o/loader.h>
 
 static const uint64_t kShimBase     = 0x0000200000000000;
@@ -22,8 +23,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
 #pragma mark - Shims
 
 @interface WFSSAPShims () {
-    WFSUnicornAPI _unicorn;
-    uc_engine _engine;
+    WFSSwiftUnicorn *_unicorn;
+    void *_engine;
     uint64_t _codeCursor;
     uint64_t _dataCursor;
     uint64_t _heapCursor;
@@ -35,7 +36,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
 
 @implementation WFSSAPShims
 
-- (nullable instancetype)initWithEngine:(uc_engine)engine
+- (nullable instancetype)initWithEngine:(void *)engine
+                                     api:(WFSSwiftUnicorn *)api
                             coreExports:(NSDictionary<NSString *, NSNumber *> *)coreExports
                                    icxs:(nullable NSData *)icxs
                                   error:(NSError **)error
@@ -44,27 +46,27 @@ static const uint64_t kShimHeapSize = 16 << 20;
     if (!self) return nil;
 
     _engine = engine;
+    _unicorn = api;
     _codeCursor = kShimBase;
     _dataCursor = kShimBase + kShimCodeSize;
     _heapCursor = kShimHeapBase;
     _entries = [NSMutableDictionary dictionary];
     _symbols = [NSMutableDictionary dictionary];
 
-    int rc = wfs_unicorn_load(&_unicorn);
-    if (rc != 0) {
-        if (error) *error = [self shimError:@"Failed to load Unicorn API"];
+    if (![_unicorn isLoaded]) {
+        if (error) *error = [self shimError:@"Unicorn API not loaded"];
         return nil;
     }
 
-    rc = _unicorn.memMap(_engine, kShimBase, kShimSize, UC_PROT_ALL);
+    int rc = [_unicorn memMap:kShimBase size:kShimSize perms:UC_PROT_ALL];
     if (rc != 0) {
-        if (error) *error = [self shimError:[NSString stringWithFormat:@"memMap shim area failed: %s", _unicorn.strerror(rc)]];
+        if (error) *error = [self shimError:[NSString stringWithFormat:@"memMap shim area failed: %s", [[_unicorn strerror:rc] UTF8String]]];
         return nil;
     }
 
-    rc = _unicorn.memMap(_engine, kShimHeapBase, kShimHeapSize, UC_PROT_ALL);
+    rc = [_unicorn memMap:kShimHeapBase size:kShimHeapSize perms:UC_PROT_ALL];
     if (rc != 0) {
-        if (error) *error = [self shimError:[NSString stringWithFormat:@"memMap shim heap failed: %s", _unicorn.strerror(rc)]];
+        if (error) *error = [self shimError:[NSString stringWithFormat:@"memMap shim heap failed: %s", [[_unicorn strerror:rc] UTF8String]]];
         return nil;
     }
 
@@ -187,7 +189,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
         if (codeSize <= kShimSlotSize && codeOffset + codeSize <= length) {
             uint64_t addr = _codeCursor;
             _codeCursor += kShimSlotSize;
-            _unicorn.memWrite(_engine, addr, bytes + codeOffset, codeSize);
+            const void *codePtr = bytes + codeOffset;
+            [_unicorn memWrite:addr data:codePtr size:codeSize];
             _symbols[name] = @(addr);
         }
     }
@@ -221,7 +224,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     _codeCursor += kShimSlotSize;
 
     uint8_t ret = 0xC3;
-    _unicorn.memWrite(_engine, addr, &ret, 1);
+    [_unicorn memWrite:addr data:&ret size:1];
 
     WFSSAPShimEntry *entry = [WFSSAPShimEntry new];
     entry.name = name;
@@ -257,7 +260,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     if (_faulted) return;
     _fault = [NSError errorWithDomain:@"WFSSAPShims" code:-1
                              userInfo:@{NSLocalizedDescriptionKey: message}];
-    _unicorn.emuStop(_engine);
+    [_unicorn emuStop];
 }
 
 - (void)resetFault
@@ -274,39 +277,36 @@ static const uint64_t kShimHeapSize = 16 << 20;
         UC_X86_REG_RCX, UC_X86_REG_R8, UC_X86_REG_R9
     };
     if (index >= 0 && index < 6) {
-        uint64_t val = 0;
-        _unicorn.regRead(_engine, regs[index], &val);
-        return val;
+        return [_unicorn regReadU64:regs[index]];
     }
-    uint64_t rsp = 0;
-    _unicorn.regRead(_engine, UC_X86_REG_RSP, &rsp);
+    uint64_t rsp = [_unicorn regReadU64:UC_X86_REG_RSP];
     uint64_t val = 0;
-    _unicorn.memRead(_engine, rsp + 8 + (index - 6) * 8, &val, 8);
+    [_unicorn memRead:(rsp + 8 + (index - 6) * 8) buffer:&val size:8];
     return val;
 }
 
 - (void)setResult:(uint64_t)value
 {
-    _unicorn.regWrite(_engine, UC_X86_REG_RAX, &value);
+    [_unicorn regWriteU64:UC_X86_REG_RAX value];
 }
 
 - (uint64_t)readGuestUint64:(uint64_t)addr
 {
     uint64_t v = 0;
-    _unicorn.memRead(_engine, addr, &v, 8);
+    [_unicorn memRead:addr buffer:&v size:8];
     return v;
 }
 
 - (uint32_t)readGuestUint32:(uint64_t)addr
 {
     uint32_t v = 0;
-    _unicorn.memRead(_engine, addr, &v, 4);
+    [_unicorn memRead:addr buffer:&v size:4];
     return v;
 }
 
 - (void)writeGuestUint64:(uint64_t)addr value:(uint64_t)value
 {
-    _unicorn.memWrite(_engine, addr, &value, 8);
+    [_unicorn memWrite:addr data:&value size:8];
 }
 
 - (NSString *)readGuestCString:(uint64_t)addr
@@ -314,7 +314,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     NSMutableString *str = [NSMutableString string];
     for (NSUInteger i = 0; i < 4096; i++) {
         uint8_t c = 0;
-        _unicorn.memRead(_engine, addr + i, &c, 1);
+        [_unicorn memRead:(addr + i) buffer:&c size:1];
         if (c == 0) break;
         [str appendFormat:@"%c", c];
     }
@@ -350,7 +350,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
         return;
     }
     uint8_t *zero = calloc(1, (size_t)aligned);
-    _unicorn.memWrite(_engine, addr, zero, aligned);
+    [_unicorn memWrite:addr data:zero size:aligned];
     free(zero);
     [self setResult:addr];
 }
@@ -369,12 +369,12 @@ static const uint64_t kShimHeapSize = 16 << 20;
     }
     if (ptr != 0) {
         uint8_t *tmp = malloc((size_t)aligned);
-        _unicorn.memRead(_engine, ptr, tmp, aligned);
-        _unicorn.memWrite(_engine, newAddr, tmp, aligned);
+        [_unicorn memRead:ptr buffer:tmp size:aligned];
+        [_unicorn memWrite:newAddr data:tmp size:aligned];
         free(tmp);
     } else {
         uint8_t *zero = calloc(1, (size_t)aligned);
-        _unicorn.memWrite(_engine, newAddr, zero, aligned);
+        [_unicorn memWrite:newAddr data:zero size:aligned];
         free(zero);
     }
     [self setResult:newAddr];
@@ -392,8 +392,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t n = [self argumentAtIndex:2];
     if (n > 0) {
         uint8_t *tmp = malloc((size_t)n);
-        _unicorn.memRead(_engine, src, tmp, n);
-        _unicorn.memWrite(_engine, dst, tmp, n);
+        [_unicorn memRead:src buffer:tmp size:n];
+        [_unicorn memWrite:dst data:tmp size:n];
         free(tmp);
     }
     [self setResult:dst];
@@ -407,7 +407,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     if (n > 0) {
         uint8_t *tmp = calloc(1, (size_t)n);
         memset(tmp, c, (size_t)n);
-        _unicorn.memWrite(_engine, dst, tmp, n);
+        [_unicorn memWrite:dst data:tmp size:n];
         free(tmp);
     }
     [self setResult:dst];
@@ -420,8 +420,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t n = [self argumentAtIndex:2];
     if (n > 0) {
         uint8_t *tmp = malloc((size_t)n);
-        _unicorn.memRead(_engine, src, tmp, n);
-        _unicorn.memWrite(_engine, dst, tmp, n);
+        [_unicorn memRead:src buffer:tmp size:n];
+        [_unicorn memWrite:dst data:tmp size:n];
         free(tmp);
     }
     [self setResult:dst];
@@ -433,7 +433,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t len = 0;
     for (uint64_t i = 0; i < 65536; i++) {
         uint8_t c = 0;
-        _unicorn.memRead(_engine, addr + i, &c, 1);
+        [_unicorn memRead:(addr + i) buffer:&c size:1];
         if (c == 0) break;
         len++;
     }
@@ -446,8 +446,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t b = [self argumentAtIndex:1];
     for (uint64_t i = 0; i < 65536; i++) {
         uint8_t ca = 0, cb = 0;
-        _unicorn.memRead(_engine, a + i, &ca, 1);
-        _unicorn.memRead(_engine, b + i, &cb, 1);
+        [_unicorn memRead:(a + i) buffer:&ca size:1];
+        [_unicorn memRead:(b + i) buffer:&cb size:1];
         if (ca != cb) { [self setResult:(int64_t)(ca - cb)]; return; }
         if (ca == 0) { [self setResult:0]; return; }
     }
@@ -461,8 +461,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t n = [self argumentAtIndex:2];
     for (uint64_t i = 0; i < n; i++) {
         uint8_t ca = 0, cb = 0;
-        _unicorn.memRead(_engine, a + i, &ca, 1);
-        _unicorn.memRead(_engine, b + i, &cb, 1);
+        [_unicorn memRead:(a + i) buffer:&ca size:1];
+        [_unicorn memRead:(b + i) buffer:&cb size:1];
         if (ca != cb) { [self setResult:(int64_t)(ca - cb)]; return; }
         if (ca == 0) { [self setResult:0]; return; }
     }
@@ -475,8 +475,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t src = [self argumentAtIndex:1];
     for (uint64_t i = 0; i < 65536; i++) {
         uint8_t c = 0;
-        _unicorn.memRead(_engine, src + i, &c, 1);
-        _unicorn.memWrite(_engine, dst + i, &c, 1);
+        [_unicorn memRead:(src + i) buffer:&c size:1];
+        [_unicorn memWrite:(dst + i) data:&c size:1];
         if (c == 0) break;
     }
     [self setResult:dst];
@@ -489,12 +489,12 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t n = [self argumentAtIndex:2];
     for (uint64_t i = 0; i < n; i++) {
         uint8_t c = 0;
-        _unicorn.memRead(_engine, src + i, &c, 1);
-        _unicorn.memWrite(_engine, dst + i, &c, 1);
+        [_unicorn memRead:(src + i) buffer:&c size:1];
+        [_unicorn memWrite:(dst + i) data:&c size:1];
         if (c == 0) {
             for (uint64_t j = i + 1; j < n; j++) {
                 uint8_t z = 0;
-                _unicorn.memWrite(_engine, dst + j, &z, 1);
+                [_unicorn memWrite:(dst + j) data:&z size:1];
             }
             break;
         }
@@ -508,7 +508,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     uint64_t len = 0;
     for (uint64_t i = 0; i < 65536; i++) {
         uint8_t c = 0;
-        _unicorn.memRead(_engine, src + i, &c, 1);
+        [_unicorn memRead:(src + i) buffer:&c size:1];
         if (c == 0) { len = i; break; }
     }
     uint64_t aligned = (len + 1 + 15) & ~15ULL;
@@ -519,8 +519,8 @@ static const uint64_t kShimHeapSize = 16 << 20;
         return;
     }
     uint8_t *tmp = malloc((size_t)(len + 1));
-    _unicorn.memRead(_engine, src, tmp, len + 1);
-    _unicorn.memWrite(_engine, dst, tmp, len + 1);
+    [_unicorn memRead:src buffer:tmp size:(len + 1)];
+    [_unicorn memWrite:dst data:tmp size:(len + 1)];
     free(tmp);
     [self setResult:dst];
 }
@@ -592,7 +592,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
     if (len > 0) {
         uint8_t *tmp = malloc((size_t)len);
         arc4random_buf(tmp, (size_t)len);
-        _unicorn.memWrite(_engine, dst, tmp, len);
+        [_unicorn memWrite:dst data:tmp size:len];
         free(tmp);
     }
     [self setResult:0];
@@ -618,10 +618,9 @@ static const uint64_t kShimHeapSize = 16 << 20;
 - (void)close
 {
     if (_hook) {
-        _unicorn.hookDel(_engine, _hook);
+        [_unicorn hookDel:_hook];
         _hook = NULL;
     }
-    wfs_unicorn_unload(&_unicorn);
 }
 
 - (void)dealloc

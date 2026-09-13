@@ -1,6 +1,6 @@
 #import "WFSSAPMachine.h"
 #import "WFSSAPShims.h"
-#import "WFSUnicorn.h"
+#import "WFSSwiftUnicorn-Swift.h"
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
 #import <mach-o/nlist.h>
@@ -44,7 +44,7 @@ static NSString *const kEntryNames[] = {
     @"_jEHf8Xzsv8K",
 };
 
-static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void *user_data)
 {
     (void)uc; (void)size;
     WFSSAPShims *shims = (__bridge WFSSAPShims *)user_data;
@@ -80,7 +80,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
 - (nullable instancetype)initWithName:(NSString *)name data:(NSData *)data error:(NSError **)error;
 - (nullable NSNumber *)exportAddress:(NSString *)symbolName loadBase:(uint64_t)loadBase error:(NSError **)error;
 - (void)relocate:(uint64_t)loadBase resolver:(uint64_t(^)(NSString *))resolver error:(NSError **)error;
-- (void)loadIntoEngine:(WFSUnicornAPI *)api engine:(uc_engine)engine error:(NSError **)error;
+- (void)loadIntoEngine:(WFSSwiftUnicorn *)api engine:(void *)engine error:(NSError **)error;
 @end
 
 @implementation WFSSAPMachOImage
@@ -285,7 +285,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     _loadedBase = loadBase;
 }
 
-- (void)loadIntoEngine:(WFSUnicornAPI *)api engine:(uc_engine)engine error:(NSError **)error
+- (void)loadIntoEngine:(WFSSwiftUnicorn *)api engine:(void *)engine error:(NSError **)error
 {
     if (!_relocated) {
         if (error) *error = [self err:[NSString stringWithFormat:@"%@ must be relocated first", _name]];
@@ -308,9 +308,9 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
         return;
     }
 
-    int rc = api->memMap(engine, _loadedBase, span, UC_PROT_ALL);
+    int rc = [api memMap:_loadedBase size:span perms:UC_PROT_ALL];
     if (rc != 0) {
-        if (error) *error = [self err:[NSString stringWithFormat:@"memMap %@ failed: %s", _name, api->strerror(rc)]];
+        if (error) *error = [self err:[NSString stringWithFormat:@"memMap %@ failed: %s", _name, [[api strerror:rc] UTF8String]]];
         return;
     }
 
@@ -322,9 +322,9 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
         uint64_t segFileOff = [seg[@"fileoff"] unsignedLongLongValue];
         uint64_t destAddr = _loadedBase + (segAddr - _base);
 
-        rc = api->memWrite(engine, destAddr, _data.bytes + segFileOff, fileSize);
+        rc = [api memWrite:destAddr data:_data.bytes + segFileOff size:fileSize];
         if (rc != 0) {
-            if (error) *error = [self err:[NSString stringWithFormat:@"memWrite %@ seg %@: %s", _name, seg[@"name"], api->strerror(rc)]];
+            if (error) *error = [self err:[NSString stringWithFormat:@"memWrite %@ seg %@: %s", _name, seg[@"name"], [[api strerror:rc] UTF8String]]];
             return;
         }
     }
@@ -384,8 +384,8 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
 #pragma mark - Machine
 
 @interface WFSSAPMachine ()
-@property (nonatomic, assign) WFSUnicornAPI unicorn;
-@property (nonatomic, assign) uc_engine engine;
+@property (nonatomic, strong) WFSSwiftUnicorn *unicorn;
+@property (nonatomic, assign) void *engine;
 @property (nonatomic, strong) WFSSAPMachOImage *coreFPImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceCoreImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceKitImage;
@@ -415,21 +415,21 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     self = [super init];
     if (!self) return nil;
 
-    if (wfs_unicorn_load(&_unicorn) != 0) {
+    WFSSwiftUnicorn *unicorn = [WFSSwiftUnicorn load];
+    if (!unicorn || ![unicorn isLoaded]) {
         if (error) *error = [self machineError:@"Failed to load Unicorn. Install libunicorn.dylib."];
         return nil;
     }
+    _unicorn = unicorn;
 
-    uint32_t major = 0, minor = 0;
-    _unicorn.version(&major, &minor);
+    uint32_t major = 2, minor = 1;
 
-    uc_engine *eng = NULL;
-    int rc = _unicorn.open(UC_ARCH_X86, UC_MODE_64, &eng);
-    _engine = eng;
+    int rc = [_unicorn openArch:UC_ARCH_X86 mode:UC_MODE_64];
     if (rc != 0) {
-        if (error) *error = [self machineError:[NSString stringWithFormat:@"uc_open: %s", _unicorn.strerror(rc)]];
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"uc_open: %s", [[_unicorn strerror:rc] UTF8String]]];
         return nil;
     }
+    _engine = [_unicorn engine];
 
     BOOL ready = NO;
     @try {
@@ -468,10 +468,10 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
         [self mapMemory];
 
         uint8_t hlt = 0xF4;
-        _unicorn.memWrite(_engine, kReturnAddress, &hlt, 1);
+        [_unicorn memWrite:kReturnAddress data:&hlt size:1];
 
         NSError *shimError = nil;
-        _shims = [[WFSSAPShims alloc] initWithEngine:_engine coreExports:allExports icxs:coreFPICXS error:&shimError];
+        _shims = [[WFSSAPShims alloc] initWithEngine:_engine api:_unicorn coreExports:allExports icxs:coreFPICXS error:&shimError];
         if (!_shims) {
             if (error) *error = shimError;
             return nil;
@@ -479,10 +479,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
 
         {
             void *shimHook = NULL;
-            _unicorn.hookAdd(_engine, &shimHook, UC_HOOK_CODE,
-                             (void *)shimCodeHookCallback,
-                             (uint64_t)(__bridge void *)_shims,
-                             0x0000200000000000ULL, 0x0000200000080000ULL);
+            (void)[_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {
@@ -505,11 +502,11 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
         [_commerceKitImage relocate:kKitBase resolver:resolver error:error];
         if (error && *error) return nil;
 
-        [_coreFPImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        [_coreFPImage loadIntoEngine:_unicorn engine:_engine error:error];
         if (error && *error) return nil;
-        [_commerceCoreImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        [_commerceCoreImage loadIntoEngine:_unicorn engine:_engine error:error];
         if (error && *error) return nil;
-        [_commerceKitImage loadIntoEngine:&_unicorn engine:_engine error:error];
+        [_commerceKitImage loadIntoEngine:_unicorn engine:_engine error:error];
         if (error && *error) return nil;
 
         ready = YES;
@@ -531,7 +528,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
         {kStackBase, kStackSize},
     };
     for (size_t i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
-        _unicorn.memMap(_engine, regions[i].addr, regions[i].size, UC_PROT_ALL);
+        [_unicorn memMap:regions[i].addr size:regions[i].size perms:UC_PROT_ALL];
     }
 }
 
@@ -543,7 +540,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     _scratchCursor += reserved;
     if (size > 0) {
         void *zero = calloc(1, (size_t)reserved);
-        _unicorn.memWrite(_engine, addr, zero, reserved);
+        [_unicorn memWrite:addr data:zero size:reserved];
         free(zero);
     }
     return addr;
@@ -552,27 +549,27 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
 - (uint64_t)scratchWrite:(const void *)data size:(uint64_t)size
 {
     uint64_t addr = [self scratchReserve:size];
-    if (addr && data && size) _unicorn.memWrite(_engine, addr, data, size);
+    if (addr && data && size) [_unicorn memWrite:addr data:data size:size];
     return addr;
 }
 
 - (uint64_t)readUint64:(uint64_t)address
 {
     uint64_t v = 0;
-    _unicorn.memRead(_engine, address, &v, 8);
+    [_unicorn memRead:address buffer:&v size:8];
     return v;
 }
 
 - (uint32_t)readUint32:(uint64_t)address
 {
     uint32_t v = 0;
-    _unicorn.memRead(_engine, address, &v, 4);
+    [_unicorn memRead:address buffer:&v size:4];
     return v;
 }
 
 - (void)writeUint64:(uint64_t)address value:(uint64_t)value
 {
-    _unicorn.memWrite(_engine, address, &value, 8);
+    [_unicorn memWrite:address data:&value size:8];
 }
 
 - (NSData *)consumeOutput:(uint64_t)ptrField lengthField:(uint64_t)lenField
@@ -581,9 +578,9 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     uint64_t len = [self readUint64:lenField];
     if (len > kMaxOutputSize || ptr == 0) return nil;
     NSMutableData *out = [NSMutableData dataWithLength:len];
-    _unicorn.memRead(_engine, ptr, out.mutableBytes, len);
+    [_unicorn memRead:ptr buffer:out.mutableBytes size:len];
     uint64_t mapped = (len + kPageSize - 1) & ~(kPageSize - 1);
-    _unicorn.memUnmap(_engine, ptr, mapped);
+    [_unicorn memUnmap:ptr size:mapped];
     return out;
 }
 
@@ -608,21 +605,19 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     }
     for (int i = 0; i < regCount; i++) {
         uint64_t val = (i < count) ? args[i] : 0;
-        _unicorn.regWrite(_engine, regs[i], &val);
+        [_unicorn regWriteU64:regs[i] val];
     }
-    _unicorn.regWrite(_engine, UC_X86_REG_RSP, &stackPtr);
+    [_unicorn regWriteU64:UC_X86_REG_RSP value:stackPtr];
 
-    int rc = _unicorn.emuStart(_engine, function, kReturnAddress, kSAPGuestTimeout * 1000000ULL, 0);
+    int rc = [_unicorn emuStart:function until:kReturnAddress timeout:kSAPGuestTimeout * 1000000ULL count:0];
     if (rc != 0) return 0;
 
     if (_shims.faulted) return 0;
 
-    uint64_t rip = 0;
-    _unicorn.regRead(_engine, UC_X86_REG_RIP, &rip);
+    uint64_t rip = [_unicorn regReadU64:UC_X86_REG_RIP];
     if (rip != kReturnAddress) return 0;
 
-    uint64_t rax = 0;
-    _unicorn.regRead(_engine, UC_X86_REG_RAX, &rax);
+    uint64_t rax = [_unicorn regReadU64:UC_X86_REG_RAX];
     return rax;
 }
 
@@ -730,8 +725,7 @@ static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size,
     _closed = YES;
     [_shims close];
     _shims = nil;
-    if (_engine) { _unicorn.close(_engine); _engine = NULL; }
-    wfs_unicorn_unload(&_unicorn);
+    if (_unicorn) { [_unicorn closeEngine]; _unicorn = nil; }
 }
 
 - (void)dealloc { [self close]; }

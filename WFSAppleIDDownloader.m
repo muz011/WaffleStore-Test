@@ -1181,11 +1181,20 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		[additionalHeaders addEntriesFromDictionary:self.anisetteHeaders];
 	}
 
+	NSData* bodyData = WFSEncodeCompactXMLPlist(body);
 	if (self.sapSigner)
 	{
-		NSData* bodyData = WFSEncodeCompactXMLPlist(body);
 		if (bodyData.length)
 		{
+			unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+			CC_SHA256(bodyData.bytes, (CC_LONG)bodyData.length, hash);
+			NSMutableString* hashHex = [NSMutableString string];
+			for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++)
+			{
+				[hashHex appendFormat:@"%02x", hash[i]];
+			}
+			[diagnostics addObject:[NSString stringWithFormat:@"SAP: body SHA-256=%@ (%lu bytes)", hashHex, (unsigned long)bodyData.length]];
+
 			NSError* signError = nil;
 			NSData* signature = [self.sapSigner sign:bodyData error:&signError];
 			if (signature.length)
@@ -1204,7 +1213,6 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 	}
 
-	NSData* bodyData = WFSEncodeCompactXMLPlist(body);
 	[self postRawData:bodyData toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:additionalHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)

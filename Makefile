@@ -11,11 +11,12 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = WaffleStore
 
-WaffleStore_FILES = $(wildcard *.m)
+WaffleStore_FILES = $(wildcard *.m) $(wildcard *.swift)
 WaffleStore_FRAMEWORKS = UIKit CoreGraphics CoreServices SystemConfiguration Security
 WaffleStore_PRIVATE_FRAMEWORKS = Preferences
 WaffleStore_CFLAGS = -fobjc-arc
 WaffleStore_LDFLAGS = -lsqlite3 -lz -lbz2
 WaffleStore_CODESIGN_FLAGS = -Sentitlements.plist
+WaffleStore_SWIFTFLAGS = -import-objc-header WFSBridgingHeader.h
 
 include $(THEOS_MAKE_PATH)/application.mk

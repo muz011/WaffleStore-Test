@@ -2,7 +2,8 @@
 #define WFSSAPShims_h
 
 #import <Foundation/Foundation.h>
-#import "WFSUnicorn.h"
+
+@class WFSSwiftUnicorn;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -11,7 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign, readonly) BOOL faulted;
 @property (nonatomic, strong, readonly, nullable) NSError *fault;
 
-- (nullable instancetype)initWithEngine:(uc_engine)engine
+- (nullable instancetype)initWithEngine:(void *)engine
+                                     api:(WFSSwiftUnicorn *)api
                             coreExports:(NSDictionary<NSString *, NSNumber *> *)coreExports
                                    icxs:(nullable NSData *)icxs
                                   error:(NSError **)error;
