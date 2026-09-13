@@ -1,5 +1,6 @@
 #import "WFSAppleIDDownloader.h"
 #import "WFSSAPAssetsManager.h"
+#import "WFSCompactPlist.h"
 #import <CommonCrypto/CommonDigest.h>
 
 NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDomain";
@@ -1182,10 +1183,10 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 	if (self.sapSigner)
 	{
-		NSError* signError = nil;
-		NSData* bodyData = [NSPropertyListSerialization dataWithPropertyList:body format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+		NSData* bodyData = WFSEncodeCompactXMLPlist(body);
 		if (bodyData.length)
 		{
+			NSError* signError = nil;
 			NSData* signature = [self.sapSigner sign:bodyData error:&signError];
 			if (signature.length)
 			{
@@ -1203,7 +1204,8 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 	}
 
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:additionalHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	NSData* bodyData = WFSEncodeCompactXMLPlist(body);
+	[self postRawData:bodyData toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:additionalHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -1681,13 +1683,17 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated tokenHeaders:(BOOL)tokenHeaders additionalHeaders:(NSDictionary*)additionalHeaders completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
 {
-	NSError* serializationError = nil;
-	NSData* bodyData = [NSPropertyListSerialization dataWithPropertyList:body format:NSPropertyListXMLFormat_v1_0 options:0 error:&serializationError];
-	if (!bodyData)
+	NSData* bodyData = WFSEncodeCompactXMLPlist(body);
+	if (!bodyData.length)
 	{
 		completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Failed to build request."]);
 		return;
 	}
+	[self postRawData:bodyData toURL:url contentType:contentType authenticated:authenticated tokenHeaders:tokenHeaders additionalHeaders:additionalHeaders completion:completion];
+}
+
+- (void)postRawData:(NSData*)bodyData toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated tokenHeaders:(BOOL)tokenHeaders additionalHeaders:(NSDictionary*)additionalHeaders completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
+{
 	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
 	request.HTTPMethod = @"POST";
 	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
