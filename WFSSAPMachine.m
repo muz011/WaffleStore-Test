@@ -479,8 +479,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
         }
 
         {
-            void *shimHook = NULL;
-            [_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL hookOut:&shimHook];
+            (void)[_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {
