@@ -1,5 +1,6 @@
 #import "WFSSAPMachine.h"
 #import "WFSSAPShims.h"
+#import "WFSBridgingHeader.h"
 #import "WaffleStore-Swift.h"
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
@@ -605,9 +606,9 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     }
     for (int i = 0; i < regCount; i++) {
         uint64_t val = (i < count) ? args[i] : 0;
-        [_unicorn regWriteU64:regs[i] val];
+        [_unicorn regWriteU64:regs[i] :val];
     }
-    [_unicorn regWriteU64:UC_X86_REG_RSP value:stackPtr];
+    [_unicorn regWriteU64:UC_X86_REG_RSP :stackPtr];
 
     int rc = [_unicorn emuStart:function until:kReturnAddress timeout:kSAPGuestTimeout * 1000000ULL count:0];
     if (rc != 0) return 0;

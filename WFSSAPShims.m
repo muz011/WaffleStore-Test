@@ -1,4 +1,5 @@
 #import "WFSSAPShims.h"
+#import "WFSBridgingHeader.h"
 #import "WaffleStore-Swift.h"
 #import <mach-o/loader.h>
 
@@ -287,7 +288,7 @@ static const uint64_t kShimHeapSize = 16 << 20;
 
 - (void)setResult:(uint64_t)value
 {
-    [_unicorn regWriteU64:UC_X86_REG_RAX value];
+    [_unicorn regWriteU64:UC_X86_REG_RAX :value];
 }
 
 - (uint64_t)readGuestUint64:(uint64_t)addr
