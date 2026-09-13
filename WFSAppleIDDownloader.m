@@ -1,4 +1,5 @@
 #import "WFSAppleIDDownloader.h"
+#import "WFSSAPAssetsManager.h"
 #import <CommonCrypto/CommonDigest.h>
 
 NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDomain";

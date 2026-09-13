@@ -1,6 +1,7 @@
 #import "WFSRootViewController.h"
 #import "WFSVersionPickerViewController.h"
 #import "WFSAppleIDDownloader.h"
+#import "WFSSAPAssetsManager.h"
 #import "WFSPatchIPA.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
@@ -1419,12 +1420,99 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		[self showAlert:@"Already Signed In" message:[NSString stringWithFormat:@"You are signed in as %@.\n\nThis session is used to fetch versions and download removed apps directly from Apple.", downloader.authenticatedAppleId.length ? downloader.authenticatedAppleId : @"your Apple ID"]];
 		return;
 	}
-	[self promptAppleIDCredentialsWithCompletion:^(BOOL success)
+	[self ensureSAPAssetsWithCompletion:^(BOOL success)
 	{
-		if (success)
+		if (!success) return;
+		[self promptAppleIDCredentialsWithCompletion:^(BOOL authSuccess)
 		{
-			[self showAlert:@"Signed In" message:@"You are signed in to Apple.\n\nYou can now use Download with Apple ID for removed apps, and your purchase history is synced into the Purchased tab."];
-		}
+			if (authSuccess)
+			{
+				[self showAlert:@"Signed In" message:@"You are signed in to Apple.\n\nYou can now use Download with Apple ID for removed apps, and your purchase history is synced into the Purchased tab."];
+			}
+		}];
+	}];
+}
+
+- (void)ensureSAPAssetsWithCompletion:(void (^)(BOOL success))completion
+{
+	WFSSAPAssetsManager* manager = [WFSSAPAssetsManager sharedManager];
+	if ([manager assetsReady])
+	{
+		completion(YES);
+		return;
+	}
+
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"SAP Assets Required"
+																 message:@"Apple's signing assets need to be downloaded before signing in. This is a one-time download (~50 MB from Apple).\n\nDownload now?"
+														  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Download" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+	{
+		[self showSAPDownloadProgressWithManager:manager completion:completion];
+	}]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+	{
+		completion(NO);
+	}]];
+	[self wfsPresentViewController:alert];
+}
+
+- (void)showSAPDownloadProgressWithManager:(WFSSAPAssetsManager*)manager completion:(void (^)(BOOL success))completion
+{
+	UIAlertController* progressAlert = [UIAlertController alertControllerWithTitle:@"Downloading SAP Assets"
+																		 message:@"Preparing download…"
+																  preferredStyle:UIAlertControllerStyleAlert];
+	UIProgressView* progress = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+	progress.translatesAutoresizingMaskIntoConstraints = NO;
+	progress.tintColor = [UIColor systemBlueColor];
+	progress.progressTintColor = [UIColor systemBlueColor];
+	progress.trackTintColor = WFSGray5Color();
+	progress.progress = 0.0f;
+	[progressAlert.view addSubview:progress];
+	[NSLayoutConstraint activateConstraints:@[
+		[progress.leadingAnchor constraintEqualToAnchor:progressAlert.view.leadingAnchor constant:16],
+		[progress.trailingAnchor constraintEqualToAnchor:progressAlert.view.trailingAnchor constant:-16],
+		[progress.bottomAnchor constraintEqualToAnchor:progressAlert.view.bottomAnchor constant:-55]
+	]];
+	[progressAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+	{
+		[manager cancel];
+		completion(NO);
+	}]];
+	[self wfsPresentViewController:progressAlert];
+
+	__weak typeof(self) weakSelf = self;
+	[manager downloadWithProgress:^(float prog, NSString* status, NSString* speed, NSString* eta)
+	{
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			__strong typeof(self) self = weakSelf;
+			if (!self) return;
+			NSMutableString* msg = [NSMutableString string];
+			if (status.length) [msg appendString:status];
+			if (prog > 0.0f) [msg appendFormat:@"\n%d%% complete", (int)(prog * 100.0f)];
+			if (speed.length && ![speed isEqualToString:@"…"]) [msg appendFormat:@"\n%@", speed];
+			if (eta.length && ![eta isEqualToString:@"…"]) [msg appendFormat:@" — %@", eta];
+			progressAlert.message = msg;
+			progress.progress = prog;
+		});
+	} completion:^(BOOL success, NSError* error)
+	{
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			__strong typeof(self) self = weakSelf;
+			if (!self) return;
+			[progressAlert dismissViewControllerAnimated:YES completion:nil];
+			if (success)
+			{
+				completion(YES);
+			}
+			else
+			{
+				NSString* msg = error.localizedDescription ?: @"Unknown error";
+				[self showAlert:@"Download Failed" message:[NSString stringWithFormat:@"Failed to download SAP assets:\n%@\n\nSAP signing requires these assets.", msg]];
+				completion(NO);
+			}
+		});
 	}];
 }
 

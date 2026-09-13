@@ -15,7 +15,7 @@ WaffleStore_FILES = $(wildcard *.m)
 WaffleStore_FRAMEWORKS = UIKit CoreGraphics CoreServices SystemConfiguration Security
 WaffleStore_PRIVATE_FRAMEWORKS = Preferences
 WaffleStore_CFLAGS = -fobjc-arc
-WaffleStore_LDFLAGS = -lsqlite3 -lz
+WaffleStore_LDFLAGS = -lsqlite3 -lz -lbz2
 WaffleStore_CODESIGN_FLAGS = -Sentitlements.plist
 
 include $(THEOS_MAKE_PATH)/application.mk

@@ -135,7 +135,15 @@ static const NSTimeInterval kWFSSAPRequestTimeout = 30.0;
     if (!bundlePath)
     {
         NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        bundlePath = [docDir stringByAppendingPathComponent:[NSString stringWithFormat:@"sap_%@.bin", name]];
+        NSString *sapAssetsPath = [docDir stringByAppendingPathComponent:[NSString stringWithFormat:@"SAPAssets/%@.bin", name]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:sapAssetsPath])
+        {
+            bundlePath = sapAssetsPath;
+        }
+        else
+        {
+            bundlePath = [docDir stringByAppendingPathComponent:[NSString stringWithFormat:@"sap_%@.bin", name]];
+        }
     }
 
     if (!bundlePath || ![[NSFileManager defaultManager] fileExistsAtPath:bundlePath])
