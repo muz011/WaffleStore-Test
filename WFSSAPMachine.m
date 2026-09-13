@@ -415,7 +415,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     self = [super init];
     if (!self) return nil;
 
-    WFSSwiftUnicorn *unicorn = [WFSSwiftUnicorn load];
+    WFSSwiftUnicorn *unicorn = [WFSSwiftUnicorn create];
     if (!unicorn || ![unicorn isLoaded]) {
         if (error) *error = [self machineError:@"Failed to load Unicorn. Install libunicorn.dylib."];
         return nil;
@@ -479,7 +479,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
         {
             void *shimHook = NULL;
-            (void)[_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
+            [_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL hookOut:&shimHook];
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {

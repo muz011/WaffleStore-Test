@@ -19,8 +19,9 @@ import Foundation
 
     @objc private(set) var engine: UnsafeMutableRawPointer?
 
-    @objc class func load() -> WFSSwiftUnicorn? {
-        return WFSSwiftUnicorn()
+    @objc class func create() -> WFSSwiftUnicorn? {
+        let instance = WFSSwiftUnicorn()
+        return instance.isLoaded ? instance : nil
     }
 
     private override init() {
@@ -116,11 +117,12 @@ import Foundation
         return fn(eng)
     }
 
-    @objc func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64) -> (Int32, UnsafeMutableRawPointer?) {
-        guard let fn = _hookAdd, let eng = engine else { return (-1, nil) }
+    @objc func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64, hookOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32 {
+        guard let fn = _hookAdd, let eng = engine else { return -1 }
         var hookPtr: UnsafeMutableRawPointer?
         let rc = fn(eng, &hookPtr, type, callback, userData, begin, end)
-        return (rc, hookPtr)
+        hookOut.pointee = hookPtr
+        return rc
     }
 
     @objc func hookDel(_ hook: UnsafeMutableRawPointer?) -> Int32 {
