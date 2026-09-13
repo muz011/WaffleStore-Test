@@ -13,6 +13,51 @@ static NSString *const kWFSCoreFPIXXSPath = @"./System/Library/PrivateFrameworks
 static const int64_t kWFSPayloadBZOffset = 0x352F40D5;
 static const int64_t kWFSCPIOOffset = 0x3A4;
 
+@interface WFSTOCXMLParserDelegate : NSObject <NSXMLParserDelegate>
+@property (nonatomic, assign) int64_t headerSize;
+@property (nonatomic, assign) int64_t payloadOffset;
+@property (nonatomic, assign) int64_t payloadSize;
+@end
+
+@implementation WFSTOCXMLParserDelegate {
+    NSString *_currentName;
+    int64_t _currentOffset;
+    int64_t _currentSize;
+    NSMutableString *_currentText;
+}
+
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
+    if ([elementName isEqualToString:@"file"]) {
+        _currentName = nil;
+        _currentOffset = 0;
+        _currentSize = 0;
+    }
+    _currentText = [NSMutableString string];
+}
+
+- (void)parser:(NSXMLParser *)parser foundCharacters:(NSString *)string {
+    [_currentText appendString:string];
+}
+
+- (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
+    NSString *trimmed = [_currentText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([elementName isEqualToString:@"name"]) {
+        _currentName = trimmed;
+    } else if ([elementName isEqualToString:@"Offset"]) {
+        _currentOffset = [trimmed longLongValue];
+    } else if ([elementName isEqualToString:@"Length"]) {
+        _currentSize = [trimmed longLongValue];
+    } else if ([elementName isEqualToString:@"file"]) {
+        if ([_currentName isEqualToString:@"Payload"] && _currentOffset > 0 && _currentSize > 0) {
+            _payloadOffset = _currentOffset + _headerSize;
+            _payloadSize = _currentSize;
+        }
+    }
+    _currentText = nil;
+}
+
+@end
+
 @interface WFSSAPAssetsManager () <NSURLSessionDataDelegate>
 @property (nonatomic, assign) WFSSAPAssetsState state;
 @property (nonatomic, assign) float progress;
@@ -292,43 +337,14 @@ static const int64_t kWFSCPIOOffset = 0x3A4;
     int64_t payloadOffset = -1;
     int64_t payloadSize = -1;
 
+    WFSTOCXMLParserDelegate *tocDelegate = [[WFSTOCXMLParserDelegate alloc] init];
+    tocDelegate.headerSize = headerSize;
     NSXMLParser *parser = [[NSXMLParser alloc] initWithData:tocData];
-    __block NSString *currentName = nil;
-    __block int64_t currentOffset = 0;
-    __block int64_t currentSize = 0;
-    __block NSMutableString *currentText = [NSMutableString string];
-    __block BOOL inDataElement = NO;
-
-    parser.didStartElement = ^(NSString *elementName, NSString *namespaceURI, NSString *qName, NSDictionary *attributeDict) {
-        if ([elementName isEqualToString:@"file"]) {
-            currentName = nil;
-            currentOffset = 0;
-            currentSize = 0;
-        }
-        inDataElement = [elementName isEqualToString:@"data"];
-        [currentText setString:@""];
-    };
-    parser.foundCharacters = ^(NSString *string) {
-        [currentText appendString:string];
-    };
-    parser.didEndElement = ^(NSString *elementName, NSString *namespaceURI, NSString *qName) {
-        NSString *trimmed = [currentText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([elementName isEqualToString:@"name"]) {
-            currentName = trimmed;
-        } else if ([elementName isEqualToString:@"Offset"]) {
-            currentOffset = [trimmed longLongValue];
-        } else if ([elementName isEqualToString:@"Length"]) {
-            currentSize = [trimmed longLongValue];
-        } else if ([elementName isEqualToString:@"file"]) {
-            if ([currentName isEqualToString:@"Payload"] && currentOffset > 0 && currentSize > 0) {
-                payloadOffset = currentOffset + headerSize;
-                payloadSize = currentSize;
-            }
-        }
-        inDataElement = NO;
-    };
-
+    parser.delegate = tocDelegate;
     [parser parse];
+
+    payloadOffset = tocDelegate.payloadOffset;
+    payloadSize = tocDelegate.payloadSize;
 
     if (payloadOffset < 0 || payloadSize < 0) {
         if (error) *error = [self err:@"Payload not found in package"];
