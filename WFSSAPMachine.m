@@ -86,7 +86,7 @@ static NSString *const kEntryNames[] = {
         return nil;
     }
 
-    _data = sliceData;
+    _data = [sliceData mutableCopy];
 
     const struct mach_header_64 *hdr = (const struct mach_header_64 *)bytes;
     _base = hdr->reserved;
@@ -337,7 +337,9 @@ static NSString *const kEntryNames[] = {
     uint32_t major = 0, minor = 0;
     _unicorn.version(&major, &minor);
 
-    int rc = _unicorn.open(UC_ARCH_X86, UC_MODE_64, &_engine);
+    uc_engine *eng = NULL;
+    int rc = _unicorn.open(UC_ARCH_X86, UC_MODE_64, &eng);
+    _engine = eng;
     if (rc != 0) {
         if (error) *error = [self machineError:[NSString stringWithFormat:@"uc_open: %s", _unicorn.strerror(rc)]];
         return nil;
