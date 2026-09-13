@@ -1,6 +1,6 @@
 #import "WFSSAPMachine.h"
 #import "WFSSAPShims.h"
-#import "WFSSwiftUnicorn-Swift.h"
+#import "WaffleStore-Swift.h"
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
 #import <mach-o/nlist.h>

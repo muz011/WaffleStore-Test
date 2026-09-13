@@ -1,5 +1,5 @@
 #import "WFSSAPShims.h"
-#import "WFSSwiftUnicorn-Swift.h"
+#import "WaffleStore-Swift.h"
 #import <mach-o/loader.h>
 
 static const uint64_t kShimBase     = 0x0000200000000000;
