@@ -1,4 +1,5 @@
 #import "WFSSAPMachine.h"
+#import "WFSSAPShims.h"
 #import "WFSUnicorn.h"
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
@@ -36,6 +37,27 @@ static NSString *const kEntryNames[] = {
     @"_jEHf8Xzsv8K",
 };
 
+static void shimCodeHookCallback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    (void)uc; (void)size;
+    WFSSAPShims *shims = (__bridge WFSSAPShims *)user_data;
+    if (shims) {
+        [shims dispatchAtAddress:address];
+    }
+}
+
+#pragma mark - Bind Entry
+
+@interface WFSSAPBindEntry : NSObject
+@property (nonatomic, copy) NSString *symbol;
+@property (nonatomic, copy) NSString *segment;
+@property (nonatomic, assign) uint64_t segOffset;
+@property (nonatomic, assign) int64_t addend;
+@end
+
+@implementation WFSSAPBindEntry
+@end
+
 #pragma mark - Mach-O Image
 
 @interface WFSSAPMachOImage : NSObject
@@ -44,6 +66,7 @@ static NSString *const kEntryNames[] = {
 @property (nonatomic, assign) uint64_t base;
 @property (nonatomic, strong) NSArray<NSDictionary *> *segments;
 @property (nonatomic, strong) NSArray<NSDictionary *> *rebases;
+@property (nonatomic, strong) NSArray<WFSSAPBindEntry *> *binds;
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *exports;
 @property (nonatomic, assign) BOOL relocated;
 @property (nonatomic, assign) uint64_t loadedBase;
@@ -93,14 +116,15 @@ static NSString *const kEntryNames[] = {
 
     NSMutableArray *segments = [NSMutableArray array];
     NSMutableArray *rebases = [NSMutableArray array];
+    NSMutableArray *binds = [NSMutableArray array];
     NSMutableDictionary *exports = [NSMutableDictionary dictionary];
 
-    const uint8_t *cmd = bytes + sizeof(struct mach_header_64);
+    const struct symtab_command *symtabCmd = NULL;
+    const struct dysymtab_command *dysymtabCmd = NULL;
+    const struct load_command *cmd = (const struct load_command *)(bytes + sizeof(struct mach_header_64));
 
     for (uint32_t i = 0; i < hdr->ncmds; i++) {
-        const struct load_command *lc = (const struct load_command *)cmd;
-
-        if (lc->cmd == LC_SEGMENT_64) {
+        if (cmd->cmd == LC_SEGMENT_64) {
             const struct segment_command_64 *seg = (const struct segment_command_64 *)cmd;
 
             [segments addObject:@{
@@ -111,7 +135,7 @@ static NSString *const kEntryNames[] = {
                 @"filesize": @(seg->filesize),
             }];
 
-            const struct section_64 *sec = (const struct section_64 *)(cmd + sizeof(struct segment_command_64));
+            const struct section_64 *sec = (const struct section_64 *)((const uint8_t *)cmd + sizeof(struct segment_command_64));
             uint32_t nsects = (seg->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64);
 
             for (uint32_t j = 0; j < nsects; j++) {
@@ -132,29 +156,190 @@ static NSString *const kEntryNames[] = {
             }
         }
 
-        if (lc->cmd == LC_SYMTAB) {
-            const struct symtab_command *symtab = (const struct symtab_command *)cmd;
-            if (symtab->symoff == 0 || symtab->stroff == 0) {
-                cmd += lc->cmdsize;
-                continue;
-            }
-            const uint8_t *strtab = bytes + symtab->stroff;
-            const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtab->symoff);
-
-            for (uint32_t j = 0; j < symtab->nsyms; j++) {
-                if (syms[j].n_value == 0) continue;
-                if (syms[j].n_type & N_STAB) continue;
-                const char *symName = (const char *)(strtab + syms[j].n_un.n_strx);
-                if (!symName || symName[0] != '_') continue;
-                exports[@(symName)] = @(syms[j].n_value);
-            }
+        if (cmd->cmd == LC_SYMTAB) {
+            symtabCmd = (const struct symtab_command *)cmd;
         }
 
-        cmd += lc->cmdsize;
+        if (cmd->cmd == LC_DYSYMTAB) {
+            dysymtabCmd = (const struct dysymtab_command *)cmd;
+        }
+
+        cmd = (const struct load_command *)((const uint8_t *)cmd + cmd->cmdsize);
+    }
+
+    if (symtabCmd && symtabCmd->symoff > 0 && symtabCmd->stroff > 0) {
+        const uint8_t *strtab = bytes + symtabCmd->stroff;
+        const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtabCmd->symoff);
+
+        for (uint32_t j = 0; j < symtabCmd->nsyms; j++) {
+            if (syms[j].n_value == 0) continue;
+            if (syms[j].n_type & N_STAB) continue;
+            const char *symName = (const char *)(strtab + syms[j].n_un.n_strx);
+            if (!symName || symName[0] != '_') continue;
+            exports[@(symName)] = @(syms[j].n_value);
+        }
+    }
+
+    if (symtabCmd && dysymtabCmd && symtabCmd->symoff > 0 && symtabCmd->stroff > 0) {
+        const uint8_t *strtab = bytes + symtabCmd->stroff;
+        const struct nlist_64 *syms = (const struct nlist_64 *)(bytes + symtabCmd->symoff);
+
+        if (dysymtabCmd->nbindogo > 0 && dysymtabCmd->bindoff > 0) {
+            const uint8_t *bindBytes = bytes + dysymtabCmd->bindoff;
+            const uint8_t *bindEnd = bindBytes + dysymtabCmd->nbindogo;
+
+            uint8_t segIdx = 0;
+            int64_t addend = 0;
+            uint64_t segOffset = 0;
+            NSString *segName = @"";
+            NSString *symName = @"";
+            BOOL done = NO;
+
+            const uint8_t *p = bindBytes;
+            while (p < bindEnd && !done) {
+                uint8_t byte = *p++;
+                uint8_t opcode = byte & 0xF0;
+                uint8_t imm = byte & 0x0F;
+
+                switch (opcode) {
+                    case 0x00: {
+                        if (imm == 0) done = YES;
+                        break;
+                    }
+                    case 0x10: {
+                        segIdx = imm;
+                        break;
+                    }
+                    case 0x20: {
+                        segOffset = imm;
+                        break;
+                    }
+                    case 0x30: {
+                        uint64_t uleb = 0;
+                        int shift = 0;
+                        while (p < bindEnd) {
+                            uint8_t b = *p++;
+                            uleb |= (uint64_t)(b & 0x7F) << shift;
+                            if ((b & 0x80) == 0) break;
+                            shift += 7;
+                        }
+                        segOffset = uleb;
+                        break;
+                    }
+                    case 0x40: {
+                        addend = imm;
+                        break;
+                    }
+                    case 0x50: {
+                        int64_t sleb = 0;
+                        int shift = 0;
+                        while (p < bindEnd) {
+                            uint8_t b = *p++;
+                            sleb |= (int64_t)(b & 0x7F) << shift;
+                            shift += 7;
+                            if ((b & 0x80) == 0) {
+                                if (shift < 64 && (b & 0x40)) sleb |= -(1LL << shift);
+                                break;
+                            }
+                        }
+                        addend = sleb;
+                        break;
+                    }
+                    case 0x60: {
+                        uint8_t symIdx = imm;
+                        uint64_t uleb = 0;
+                        int shift = 0;
+                        while (p < bindEnd) {
+                            uint8_t b = *p++;
+                            uleb |= (uint64_t)(b & 0x7F) << shift;
+                            if ((b & 0x80) == 0) break;
+                            shift += 7;
+                        }
+                        uint64_t flags = uleb;
+                        (void)flags;
+
+                        if (symIdx < symtabCmd->nsyms) {
+                            const char *sn = (const char *)(strtab + syms[symIdx].n_un.n_strx);
+                            if (sn) symName = @(sn);
+                        }
+
+                        if (segIdx < segments.count && symName.length > 0) {
+                            segName = segments[segIdx][@"name"];
+                            WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
+                            bind.symbol = symName;
+                            bind.segment = segName;
+                            bind.segOffset = segOffset;
+                            bind.addend = addend;
+                            [binds addObject:bind];
+                        }
+                        break;
+                    }
+                    case 0x70: {
+                        break;
+                    }
+                    case 0x90: {
+                        uint8_t symIdx = imm;
+                        uint64_t uleb = 0;
+                        int shift = 0;
+                        while (p < bindEnd) {
+                            uint8_t b = *p++;
+                            uleb |= (uint64_t)(b & 0x7F) << shift;
+                            if ((b & 0x80) == 0) break;
+                            shift += 7;
+                        }
+                        (void)uleb;
+
+                        if (symIdx < symtabCmd->nsyms) {
+                            const char *sn = (const char *)(strtab + syms[symIdx].n_un.n_strx);
+                            if (sn) symName = @(sn);
+                        }
+
+                        if (symName.length > 0) {
+                            WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
+                            bind.symbol = symName;
+                            bind.segment = @"";
+                            bind.segOffset = segOffset;
+                            bind.addend = 0;
+                            [binds addObject:bind];
+                        }
+                        break;
+                    }
+                    case 0xA0: {
+                        uint8_t count = imm;
+                        if (count == 0) {
+                            uint64_t uleb = 0;
+                            int shift = 0;
+                            while (p < bindEnd) {
+                                uint8_t b = *p++;
+                                uleb |= (uint64_t)(b & 0x7F) << shift;
+                                if ((b & 0x80) == 0) break;
+                                shift += 7;
+                            }
+                            count = (uint8_t)uleb;
+                        }
+                        for (uint8_t r = 0; r < count; r++) {
+                            if (symName.length > 0 && segIdx < segments.count) {
+                                WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
+                                bind.symbol = symName;
+                                bind.segment = segments[segIdx][@"name"];
+                                bind.segOffset = segOffset;
+                                bind.addend = addend;
+                                [binds addObject:bind];
+                            }
+                            segOffset += 8;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
     }
 
     _segments = segments;
     _rebases = rebases;
+    _binds = binds;
     _exports = exports;
 
     return self;
@@ -194,6 +379,29 @@ static NSString *const kEntryNames[] = {
 
         uint8_t *mutable = (uint8_t *)_data.mutableBytes;
         memcpy(mutable + fileOff, &newAddr, 8);
+    }
+
+    for (WFSSAPBindEntry *bind in _binds) {
+        uint64_t fileOff = [self fileOffsetForSegment:bind.segment offset:bind.segOffset size:8 error:error];
+        if (error && *error) return;
+
+        uint64_t resolved = resolver(bind.symbol);
+        if (resolved == 0) {
+            if (error) *error = [self err:[NSString stringWithFormat:@"unresolved bind symbol %@ in %@", bind.symbol, _name]];
+            return;
+        }
+
+        int64_t addend = bind.addend;
+        uint64_t finalAddr;
+        if (addend >= 0) {
+            finalAddr = resolved + (uint64_t)addend;
+        } else {
+            uint64_t magnitude = (uint64_t)(-(addend + 1)) + 1;
+            finalAddr = resolved - magnitude;
+        }
+
+        uint8_t *mutable = (uint8_t *)_data.mutableBytes;
+        memcpy(mutable + fileOff, &finalAddr, 8);
     }
 
     _relocated = YES;
@@ -304,6 +512,7 @@ static NSString *const kEntryNames[] = {
 @property (nonatomic, strong) WFSSAPMachOImage *coreFPImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceCoreImage;
 @property (nonatomic, strong) WFSSAPMachOImage *commerceKitImage;
+@property (nonatomic, strong) WFSSAPShims *shims;
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *resolvedEntries;
 @property (nonatomic, assign) uint64_t scratchCursor;
 @property (nonatomic, assign) BOOL closed;
@@ -384,22 +593,39 @@ static NSString *const kEntryNames[] = {
         uint8_t hlt = 0xF4;
         _unicorn.memWrite(_engine, kReturnAddress, &hlt, 1);
 
-        [_coreFPImage relocate:kCoreFPBase resolver:^uint64_t(NSString *n) {
+        NSError *shimError = nil;
+        _shims = [[WFSSAPShims alloc] initWithEngine:_engine coreExports:allExports icxs:coreFPICXS error:&shimError];
+        if (!_shims) {
+            if (error) *error = shimError;
+            return nil;
+        }
+
+        {
+            void *shimHook = NULL;
+            _unicorn.hookAdd(_engine, &shimHook, UC_HOOK_CODE,
+                             (void *)shimCodeHookCallback,
+                             (uint64_t)(__bridge void *)_shims,
+                             0, kShimBase, kShimBase + 0x80000 - 1);
+        }
+
+        uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {
             NSNumber *a = allExports[n];
-            return a ? a.unsignedLongLongValue : 0;
-        } error:error];
+            if (a) return a.unsignedLongLongValue;
+
+            NSError *resolveErr = nil;
+            uint64_t shimAddr = [self->_shims resolveSymbol:n error:&resolveErr];
+            if (shimAddr != 0) return shimAddr;
+
+            return 0;
+        };
+
+        [_coreFPImage relocate:kCoreFPBase resolver:resolver error:error];
         if (error && *error) return nil;
 
-        [_commerceCoreImage relocate:kCommerceBase resolver:^uint64_t(NSString *n) {
-            NSNumber *a = allExports[n];
-            return a ? a.unsignedLongLongValue : 0;
-        } error:error];
+        [_commerceCoreImage relocate:kCommerceBase resolver:resolver error:error];
         if (error && *error) return nil;
 
-        [_commerceKitImage relocate:kKitBase resolver:^uint64_t(NSString *n) {
-            NSNumber *a = allExports[n];
-            return a ? a.unsignedLongLongValue : 0;
-        } error:error];
+        [_commerceKitImage relocate:kKitBase resolver:resolver error:error];
         if (error && *error) return nil;
 
         [_coreFPImage loadIntoEngine:&_unicorn engine:_engine error:error];
@@ -490,6 +716,8 @@ static NSString *const kEntryNames[] = {
 {
     if (_closed || function == 0) return 0;
 
+    [_shims resetFault];
+
     int regs[] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX, UC_X86_REG_RCX, UC_X86_REG_R8, UC_X86_REG_R9};
     int regCount = 6;
     int stackArgs = count > regCount ? count - regCount : 0;
@@ -509,6 +737,8 @@ static NSString *const kEntryNames[] = {
 
     int rc = _unicorn.emuStart(_engine, function, kReturnAddress, kSAPGuestTimeout * 1000000ULL, 0);
     if (rc != 0) return 0;
+
+    if (_shims.faulted) return 0;
 
     uint64_t rip = 0;
     _unicorn.regRead(_engine, UC_X86_REG_RIP, &rip);
@@ -621,6 +851,8 @@ static NSString *const kEntryNames[] = {
 {
     if (_closed) return;
     _closed = YES;
+    [_shims close];
+    _shims = nil;
     if (_engine) { _unicorn.close(_engine); _engine = NULL; }
     wfs_unicorn_unload(&_unicorn);
 }
