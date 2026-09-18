@@ -109,8 +109,8 @@ static NSString *WFSHex(uint64_t v)
         return nil;
     }
 
-    if (![self registerMemoryServices:error]) return NO;
-    if (![self registerPlatformServices:error]) return NO;
+    if (![self registerMemoryServices:error]) return nil;
+    if (![self registerPlatformServices:error]) return nil;
 
     [self registerDataSymbols];
 
@@ -838,7 +838,8 @@ static NSString *WFSHex(uint64_t v)
     }
 
     if (outAddr != 0) {
-        _unicorn memWrite:outAddr data:out.bytes size:out.length;
+        const void *outBytes = out.bytes;
+        [_unicorn memWrite:outAddr data:outBytes size:out.length];
         uint8_t nul = 0;
         [_unicorn memWrite:(outAddr + out.length) data:&nul size:1];
     }
@@ -1136,7 +1137,7 @@ static NSString *WFSHex(uint64_t v)
     uint8_t *data = len > 0 ? malloc((size_t)len) : NULL;
     if (len > 0) [_unicorn memRead:dataAddr buffer:data size:len];
     uint8_t md[CC_SHA512_DIGEST_LENGTH];
-    block(data, (CC_LONG)MIN(len, (uint64_t)CC_LONG_MAX), md);
+    block(data, (CC_LONG)len, md);
     [_unicorn memWrite:mdAddr data:md size:digestLen];
     if (data) free(data);
     [self setResult:mdAddr];
@@ -1158,7 +1159,12 @@ static NSString *WFSHex(uint64_t v)
     if (dataLen > 0) [_unicorn memRead:dataAddr buffer:data size:dataLen];
     uint8_t mac[CC_SHA512_DIGEST_LENGTH];
     CCHmac((CCHmacAlgorithm)alg, key, (size_t)keyLen, data, (size_t)dataLen, mac);
-    [_unicorn memWrite:macOut data:mac size:CCHmacOutputSize((CCHmacAlgorithm)alg)];
+    static const size_t hmacSizes[] = {
+        CC_MD5_DIGEST_LENGTH, CC_SHA1_DIGEST_LENGTH,
+        CC_SHA224_DIGEST_LENGTH, CC_SHA256_DIGEST_LENGTH,
+        CC_SHA384_DIGEST_LENGTH, CC_SHA512_DIGEST_LENGTH
+    };
+    [_unicorn memWrite:macOut data:mac size:hmacSizes[alg]];
     if (key) free(key);
     if (data) free(data);
     [self setResult:0];
