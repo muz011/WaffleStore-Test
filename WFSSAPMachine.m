@@ -84,6 +84,46 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
     }
 }
 
+static BOOL wfsReadULEB(const uint8_t **cursor, const uint8_t *end, uint64_t *value)
+{
+    uint64_t result = 0;
+    int shift = 0;
+    const uint8_t *p = *cursor;
+    while (p < end) {
+        uint8_t byte = *p++;
+        result |= ((uint64_t)(byte & 0x7F)) << shift;
+        if (!(byte & 0x80)) {
+            *cursor = p;
+            *value = result;
+            return YES;
+        }
+        shift += 7;
+        if (shift >= 64) return NO;
+    }
+    return NO;
+}
+
+static BOOL wfsReadSLEB(const uint8_t **cursor, const uint8_t *end, int64_t *value)
+{
+    int64_t result = 0;
+    int shift = 0;
+    uint8_t byte = 0;
+    const uint8_t *p = *cursor;
+    while (p < end) {
+        byte = *p++;
+        result |= ((int64_t)(byte & 0x7F)) << shift;
+        shift += 7;
+        if (!(byte & 0x80)) break;
+        if (shift > 63) return NO;
+    }
+    if (shift < 64 && (byte & 0x40)) {
+        result |= -((int64_t)1 << shift);
+    }
+    *cursor = p;
+    *value = result;
+    return YES;
+}
+
 #pragma mark - Bind Entry
 
 @interface WFSSAPBindEntry : NSObject
@@ -108,6 +148,14 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *exports;
 @property (nonatomic, assign) BOOL relocated;
 @property (nonatomic, assign) uint64_t loadedBase;
+@property (nonatomic, assign) uint64_t linkeditFileOff;
+@property (nonatomic, assign) uint32_t rebaseOff;
+@property (nonatomic, assign) uint32_t rebaseSize;
+@property (nonatomic, assign) uint32_t bindOff;
+@property (nonatomic, assign) uint32_t bindSize;
+@property (nonatomic, assign) uint32_t lazyBindOff;
+@property (nonatomic, assign) uint32_t lazyBindSize;
+@property (nonatomic, assign) BOOL hasDyldInfo;
 - (nullable instancetype)initWithName:(NSString *)name data:(NSData *)data error:(NSError **)error;
 - (nullable NSNumber *)exportAddress:(NSString *)symbolName loadBase:(uint64_t)loadBase error:(NSError **)error;
 - (void)relocate:(uint64_t)loadBase resolver:(uint64_t(^)(NSString *))resolver error:(NSError **)error;
@@ -173,6 +221,10 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
                 @"filesize": @(seg->filesize),
             }];
 
+            if (strncmp(seg->segname, "__LINKEDIT", 10) == 0) {
+                _linkeditFileOff = seg->fileoff;
+            }
+
             const struct section_64 *sec = (const struct section_64 *)((const uint8_t *)cmd + sizeof(struct segment_command_64));
             uint32_t nsects = (seg->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64);
 
@@ -204,6 +256,17 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
             dysymtabCmd = (const struct dysymtab_command *)cmd;
         }
 
+        if (cmd->cmd == LC_DYLD_INFO || cmd->cmd == LC_DYLD_INFO_ONLY) {
+            const struct dyld_info_command *dyldInfo = (const struct dyld_info_command *)cmd;
+            _hasDyldInfo = YES;
+            _rebaseOff = dyldInfo->rebase_off;
+            _rebaseSize = dyldInfo->rebase_size;
+            _bindOff = dyldInfo->bind_off;
+            _bindSize = dyldInfo->bind_size;
+            _lazyBindOff = dyldInfo->lazy_bind_off;
+            _lazyBindSize = dyldInfo->lazy_bind_size;
+        }
+
         cmd = (const struct load_command *)((const uint8_t *)cmd + cmd->cmdsize);
     }
 
@@ -219,7 +282,7 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
             exports[@(symName)] = @(syms[j].n_value);
         }
 
-        if (dysymtabCmd && dysymtabCmd->nindirectsyms > 0 && dysymtabCmd->indirectsymoff > 0) {
+        if (!_hasDyldInfo && dysymtabCmd && dysymtabCmd->nindirectsyms > 0 && dysymtabCmd->indirectsymoff > 0) {
             const uint32_t *indirectSyms = (const uint32_t *)(bytes + dysymtabCmd->indirectsymoff);
 
             for (NSDictionary *rebase in rebases) {
@@ -253,11 +316,297 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
     }
 
     _segments = segments;
-    _rebases = rebases;
-    _binds = binds;
     _exports = exports;
 
+    if (_hasDyldInfo) {
+        NSMutableArray *dyldRebases = [NSMutableArray array];
+        NSMutableArray *dyldBinds = [NSMutableArray array];
+        if (![self parseDyldInfo:bytes rebases:dyldRebases binds:dyldBinds error:error]) {
+            return nil;
+        }
+        rebases = dyldRebases;
+        binds = dyldBinds;
+    }
+
+    _rebases = rebases;
+    _binds = binds;
+
     return self;
+}
+
+- (BOOL)parseDyldInfo:(const uint8_t *)bytes rebases:(NSMutableArray *)outRebases binds:(NSMutableArray *)outBinds error:(NSError **)error
+{
+    if (_linkeditFileOff == 0) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: LC_DYLD_INFO present but no __LINKEDIT", _name]];
+        return NO;
+    }
+
+    const uint8_t *streamBase = bytes + _linkeditFileOff;
+
+    if (_rebaseSize > 0) {
+        if (![self parseRebaseStream:streamBase + _rebaseOff size:_rebaseSize into:outRebases error:error]) {
+            return NO;
+        }
+    }
+
+    if (_bindSize > 0) {
+        if (![self parseBindStream:streamBase + _bindOff size:_bindSize into:outBinds error:error]) {
+            return NO;
+        }
+    }
+
+    if (_lazyBindSize > 0) {
+        if (![self parseBindStream:streamBase + _lazyBindOff size:_lazyBindSize into:outBinds error:error]) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+- (BOOL)parseRebaseStream:(const uint8_t *)stream size:(uint32_t)size into:(NSMutableArray *)outRebases error:(NSError **)error
+{
+    const uint8_t *p = stream;
+    const uint8_t *end = stream + size;
+    int segIndex = -1;
+    uint64_t offset = 0;
+    uint32_t type = REBASE_TYPE_POINTER;
+
+    while (p < end) {
+        uint8_t opcodeByte = *p++;
+        uint8_t opcode = opcodeByte & REBASE_OPCODE_MASK;
+
+        switch (opcode) {
+            case REBASE_OPCODE_DONE:
+                return YES;
+
+            case REBASE_OPCODE_SET_TYPE_IMM:
+                type = opcodeByte & 0x0F;
+                break;
+
+            case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                segIndex = opcodeByte & 0x0F;
+                offset = u;
+                break;
+            }
+
+            case REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                segIndex = opcodeByte & 0x0F;
+                offset += u;
+                break;
+            }
+
+            case REBASE_OPCODE_ADD_ADDR_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                offset += u;
+                break;
+            }
+
+            case REBASE_OPCODE_DO_REBASE_IMM_TIMES: {
+                if (![self addRebaseType:type count:opcodeByte & 0x0F segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
+                break;
+            }
+
+            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES: {
+                uint64_t count = 0;
+                if (!wfsReadULEB(&p, end, &count)) goto malformed;
+                if (![self addRebaseType:type count:count segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
+                break;
+            }
+
+            case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB: {
+                uint64_t u = 0;
+                if (![self addRebaseType:type count:1 segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
+                offset += 8;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                offset += u;
+                break;
+            }
+
+            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
+                uint64_t count = 0, skip = 0;
+                if (!wfsReadULEB(&p, end, &count)) goto malformed;
+                if (!wfsReadULEB(&p, end, &skip)) goto malformed;
+                if (![self addRebaseType:type count:count segmentIndex:segIndex offset:&offset skip:skip into:outRebases error:error]) return NO;
+                break;
+            }
+
+            default:
+                if (error) *error = [self err:[NSString stringWithFormat:@"%@: unsupported rebase opcode 0x%02x", _name, opcode]];
+                return NO;
+        }
+    }
+
+malformed:
+    if (error) *error = [self err:[NSString stringWithFormat:@"%@: malformed rebase stream", _name]];
+    return NO;
+}
+
+- (BOOL)addRebaseType:(uint32_t)type count:(uint64_t)count segmentIndex:(int)segIndex offset:(uint64_t *)offset skip:(uint64_t)skip into:(NSMutableArray *)outRebases error:(NSError **)error
+{
+    while (count-- > 0) {
+        if (![self addRebaseType:type count:1 segmentIndex:segIndex offset:offset into:outRebases error:error]) return NO;
+        *offset += skip;
+    }
+    return YES;
+}
+
+- (BOOL)addRebaseType:(uint32_t)type count:(uint64_t)count segmentIndex:(int)segIndex offset:(uint64_t *)offset into:(NSMutableArray *)outRebases error:(NSError **)error
+{
+    if (segIndex < 0 || segIndex >= (int)_segments.count) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: rebase segment index %d out of range", _name, segIndex]];
+        return NO;
+    }
+    if (type != REBASE_TYPE_POINTER) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: unsupported rebase type %u", _name, type]];
+        return NO;
+    }
+
+    NSString *segName = _segments[(NSUInteger)segIndex][@"name"];
+    for (uint64_t i = 0; i < count; i++) {
+        [outRebases addObject:@{
+            @"segment": segName,
+            @"offset": @(*offset + i * 8),
+            @"type": @(type),
+        }];
+    }
+    *offset += 8 * count;
+    return YES;
+}
+
+- (BOOL)parseBindStream:(const uint8_t *)stream size:(uint32_t)size into:(NSMutableArray *)outBinds error:(NSError **)error
+{
+    const uint8_t *p = stream;
+    const uint8_t *end = stream + size;
+    int segIndex = -1;
+    uint64_t offset = 0;
+    int64_t addend = 0;
+    NSString *symbol = nil;
+
+    while (p < end) {
+        uint8_t opcodeByte = *p++;
+        uint8_t opcode = opcodeByte & BIND_OPCODE_MASK;
+
+        switch (opcode) {
+            case BIND_OPCODE_DONE:
+                return YES;
+
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+            case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+                break;
+
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                break;
+            }
+
+            case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
+                const uint8_t *symBegin = p;
+                while (p < end && *p) p++;
+                if (p >= end) goto malformed;
+                symbol = [[NSString alloc] initWithBytes:symBegin length:(NSUInteger)(p - symBegin) encoding:NSUTF8StringEncoding];
+                p++;
+                break;
+            }
+
+            case BIND_OPCODE_SET_TYPE_IMM:
+                break;
+
+            case BIND_OPCODE_SET_ADDEND_SLEB: {
+                if (!wfsReadSLEB(&p, end, &addend)) goto malformed;
+                break;
+            }
+
+            case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                segIndex = opcodeByte & 0x0F;
+                offset = u;
+                break;
+            }
+
+            case BIND_OPCODE_ADD_ADDR_ULEB: {
+                uint64_t u = 0;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                offset += u;
+                break;
+            }
+
+            case BIND_OPCODE_DO_BIND: {
+                if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
+                offset += 8;
+                break;
+            }
+
+            case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: {
+                uint64_t u = 0;
+                if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
+                offset += 8;
+                if (!wfsReadULEB(&p, end, &u)) goto malformed;
+                offset += u;
+                break;
+            }
+
+            case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+                uint64_t count = 0, skip = 0;
+                if (!wfsReadULEB(&p, end, &count)) goto malformed;
+                if (!wfsReadULEB(&p, end, &skip)) goto malformed;
+                for (uint64_t i = 0; i < count; i++) {
+                    if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
+                    offset += 8 + skip;
+                }
+                break;
+            }
+
+            case BIND_OPCODE_DO_BIND_ULEB_TIMES: {
+                uint64_t count = 0;
+                if (!wfsReadULEB(&p, end, &count)) goto malformed;
+                for (uint64_t i = 0; i < count; i++) {
+                    if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
+                    offset += 8;
+                }
+                break;
+            }
+
+            case BIND_OPCODE_THREADED:
+                if (error) *error = [self err:[NSString stringWithFormat:@"%@: threaded bind fixups unsupported", _name]];
+                return NO;
+
+            default:
+                if (error) *error = [self err:[NSString stringWithFormat:@"%@: unsupported bind opcode 0x%02x", _name, opcode]];
+                return NO;
+        }
+    }
+
+malformed:
+    if (error) *error = [self err:[NSString stringWithFormat:@"%@: malformed bind stream", _name]];
+    return NO;
+}
+
+- (BOOL)addBindSymbol:(NSString *)symbol segmentIndex:(int)segIndex offset:(uint64_t)offset addend:(int64_t)addend into:(NSMutableArray *)outBinds error:(NSError **)error
+{
+    if (!symbol.length) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: bind with empty symbol", _name]];
+        return NO;
+    }
+    if (segIndex < 0 || segIndex >= (int)_segments.count) {
+        if (error) *error = [self err:[NSString stringWithFormat:@"%@: bind segment index %d out of range", _name, segIndex]];
+        return NO;
+    }
+
+    WFSSAPBindEntry *bind = [WFSSAPBindEntry new];
+    bind.symbol = symbol;
+    bind.segment = _segments[(NSUInteger)segIndex][@"name"];
+    bind.segOffset = offset;
+    bind.addend = addend;
+    [outBinds addObject:bind];
+    return YES;
 }
 
 - (nullable NSNumber *)exportAddress:(NSString *)symbolName loadBase:(uint64_t)loadBase error:(NSError **)error
