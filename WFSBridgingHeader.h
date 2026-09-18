@@ -18,9 +18,19 @@ enum {
 };
 
 enum {
-    UC_HOOK_CODE        = 1,
-    UC_HOOK_BLOCK       = 2,
-    UC_HOOK_MEM_UNMAPPED = 0x10,
+    UC_HOOK_INTR                = 1 << 0,
+    UC_HOOK_INSN                = 1 << 1,
+    UC_HOOK_CODE                = 1 << 2,
+    UC_HOOK_BLOCK               = 1 << 3,
+};
+
+enum {
+    UC_HOOK_MEM_READ_UNMAPPED   = 1 << 4,
+    UC_HOOK_MEM_WRITE_UNMAPPED  = 1 << 5,
+    UC_HOOK_MEM_FETCH_UNMAPPED  = 1 << 6,
+    UC_HOOK_MEM_READ_PROT       = 1 << 7,
+    UC_HOOK_MEM_WRITE_PROT      = 1 << 8,
+    UC_HOOK_MEM_FETCH_PROT      = 1 << 9,
 };
 
 enum {

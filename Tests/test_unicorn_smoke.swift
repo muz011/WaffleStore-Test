@@ -63,7 +63,7 @@ struct UnicornSmokeTest {
         let w2 = uni.memWriteBytes(0x20000, bytes: nops)
         check("hook region code written (rc=\(w2))", w2 == 0)
 
-        let hookRc = uni.hookAdd(type: 1, callback: cbPtr, userData: 0, begin: 0x20000, end: 0x20010)
+        let hookRc = uni.hookAdd(type: 4, callback: cbPtr, userData: 0, begin: 0x20000, end: 0x20010)
         let hookHandle = uni.lastHook
         check("f) ranged code hook installs (rc=\(hookRc), handle=\(hookHandle))", hookRc == 0 && hookHandle != 0)
 
@@ -82,7 +82,7 @@ struct UnicornSmokeTest {
         check("region executes after hook removal (rc=\(hr2))", hr2 == 0)
         check("hook no longer fires (deltas: \(hookCount() - delBase))", hookCount() == delBase)
 
-        let fullHookRc = uni.hookAdd(type: 1, callback: cbPtr, userData: 0, begin: 1, end: 0)
+        let fullHookRc = uni.hookAdd(type: 4, callback: cbPtr, userData: 0, begin: 1, end: 0)
         let fullHandle = uni.lastHook
         check("full-range hook installs (rc=\(fullHookRc), handle=\(fullHandle))", fullHookRc == 0 && fullHandle != 0)
 

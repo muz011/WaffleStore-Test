@@ -15,9 +15,17 @@
 #define UC_PROT_EXEC   4
 #define UC_PROT_ALL    7
 
-#define UC_HOOK_CODE     1
-#define UC_HOOK_BLOCK    2
-#define UC_HOOK_MEM_UNMAPPED  0x10
+#define UC_HOOK_INTR    (1 << 0)
+#define UC_HOOK_INSN    (1 << 1)
+#define UC_HOOK_CODE    (1 << 2)
+#define UC_HOOK_BLOCK   (1 << 3)
+
+#define UC_HOOK_MEM_READ_UNMAPPED   (1 << 4)
+#define UC_HOOK_MEM_WRITE_UNMAPPED  (1 << 5)
+#define UC_HOOK_MEM_FETCH_UNMAPPED  (1 << 6)
+#define UC_HOOK_MEM_READ_PROT       (1 << 7)
+#define UC_HOOK_MEM_WRITE_PROT      (1 << 8)
+#define UC_HOOK_MEM_FETCH_PROT      (1 << 9)
 
 #define UC_MEM_READ_UNMAPPED    1
 #define UC_MEM_WRITE_UNMAPPED   2
