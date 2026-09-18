@@ -30,10 +30,21 @@ jobs:
           mv ./packages/*.ipa ./output/WaffleStore-$SHORT.ipa
           cp ./output/WaffleStore-$SHORT.ipa ./output/WaffleStore.tipa
 
-      - name: Compile and run Unicorn smoke test
+      - name: Probe unicorn memory hook dispatch (direct C)
         run: |
           cd $GITHUB_WORKSPACE
           HOMEBREW_NO_AUTO_UPDATE=1 brew install unicorn >/dev/null 2>&1 || echo "brew install unicorn unavailable"
+          LIB="$(brew --prefix unicorn 2>/dev/null)/lib/libunicorn.2.dylib"
+          clang -O0 Tests/unicorn_mem_probe.c -o /tmp/unicorn_mem_probe -ldl
+          if [[ -e "$LIB" ]]; then
+            /tmp/unicorn_mem_probe "$LIB"
+          else
+            echo "libunicorn not present; probe skipped"
+          fi
+
+      - name: Compile and run Unicorn smoke test
+        run: |
+          cd $GITHUB_WORKSPACE
           clang -O0 -c Tests/unicorn_smoke_helper.c -o /tmp/wfs_unicorn_smoke.o
           swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift /tmp/wfs_unicorn_smoke.o
           LIB="$(brew --prefix unicorn 2>/dev/null)/lib/libunicorn.2.dylib"
@@ -41,17 +52,6 @@ jobs:
             WFS_UNICORN_LIB="$LIB" /tmp/wfs_unicorn_smoke
           else
             echo "libunicorn not present; smoke test compiled but skipped runtime"
-          fi
-
-      - name: Probe unicorn memory hook dispatch (direct C)
-        run: |
-          cd $GITHUB_WORKSPACE
-          LIB="$(brew --prefix unicorn 2>/dev/null)/lib/libunicorn.2.dylib"
-          clang -O0 Tests/unicorn_mem_probe.c -o /tmp/unicorn_mem_probe -ldl
-          if [[ -e "$LIB" ]]; then
-            /tmp/unicorn_mem_probe "$LIB"
-          else
-            echo "libunicorn not present; probe skipped"
           fi
 
       - name: Upload Artifact
