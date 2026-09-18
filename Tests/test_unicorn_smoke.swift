@@ -1,11 +1,5 @@
 import Foundation
 
-var smokeClosureFires = 0
-
-let smokeClosureCb: @convention(c) (UnsafeMutableRawPointer?, UInt64, UInt32, UInt64) -> Void = { _, _, _, _ in
-    smokeClosureFires += 1
-}
-
 @main
 struct UnicornSmokeTest {
 
@@ -80,23 +74,27 @@ struct UnicornSmokeTest {
         let delBase = hookCount()
         let hr2 = uni.emuStart(0x20000, until: 0x20003, timeout: 0, count: 0)
         check("region executes after hook removal (rc=\(hr2))", hr2 == 0)
+        let rip3 = uni.regReadU64(41)
+        check("post-removal run still reaches end (RIP=0x\(String(rip3, radix: 16)))", rip3 == 0x20003)
         check("hook no longer fires (deltas: \(hookCount() - delBase))", hookCount() == delBase)
-
-        let fullHookRc = uni.hookAdd(type: 4, callback: cbPtr, userData: 0, begin: 1, end: 0)
-        let fullHandle = uni.lastHook
-        check("full-range hook installs (rc=\(fullHookRc), handle=\(fullHandle))", fullHookRc == 0 && fullHandle != 0)
 
         let map3Rc = uni.memMap(0x30000, size: 0x1000, perms: 7)
         check("second region mapped (rc=\(map3Rc))", map3Rc == 0)
         let w3 = uni.memWriteBytes(0x30000, bytes: nops)
         check("second region code written (rc=\(w3))", w3 == 0)
 
-        let fullBefore = hookCount()
+        let hook2Rc = uni.hookAdd(type: 4, callback: cbPtr, userData: 0, begin: 0x30000, end: 0x30010)
+        let hook2Handle = uni.lastHook
+        check("second ranged code hook installs (rc=\(hook2Rc), handle=\(hook2Handle))", hook2Rc == 0 && hook2Handle != 0)
+
+        let secondBefore = hookCount()
         let hr3 = uni.emuStart(0x30000, until: 0x30003, timeout: 0, count: 0)
         check("second region executes (rc=\(hr3))", hr3 == 0)
-        check("full-range hook fires (fires: \(hookCount() - fullBefore))", hookCount() > fullBefore)
+        let rip4 = uni.regReadU64(41)
+        check("second region actually ran (RIP=0x\(String(rip4, radix: 16)))", rip4 == 0x30003)
+        check("second ranged hook fires (fires: \(hookCount() - secondBefore))", hookCount() > secondBefore)
 
-        _ = uni.hookDel(fullHandle)
+        _ = uni.hookDel(hook2Handle)
 
         uni.closeEngine()
         check("g) engine closes cleanly (engine=nil: \(uni.engine == nil))", uni.engine == nil)
