@@ -432,14 +432,14 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     }
     _unicorn = unicorn;
 
-    uint32_t major = 2, minor = 1;
-
     int rc = [_unicorn openArch:UC_ARCH_X86 mode:UC_MODE_64];
     if (rc != 0) {
         if (error) *error = [self machineError:[NSString stringWithFormat:@"uc_open: %s", [[_unicorn strerror:rc] UTF8String]]];
         return nil;
     }
     _engine = [_unicorn engine];
+
+    NSLog(@"WFSSAPMachine: Unicorn %@", [_unicorn libraryVersion]);
 
     BOOL ready = NO;
     @try {

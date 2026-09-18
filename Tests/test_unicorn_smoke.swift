@@ -21,8 +21,14 @@ struct UnicornSmokeTest {
         }
         check("a) libunicorn loads", true)
 
+        let ver = uni.libraryVersion()
+        check("a) runtime version reported (\(ver))", !ver.isEmpty && ver != "unknown")
+
         let openRc = uni.openArch(4, mode: 8)
         check("b) x86-64 engine opens (rc=\(openRc))", openRc == 0)
+
+        let errnoVal = uni.lastErrno()
+        check("b) uc_errno queryable (val=\(errnoVal))", errnoVal == 0)
 
         let mapRc = uni.memMap(0x10000, size: 0x1000, perms: 7)
         check("c) memory can be mapped (rc=\(mapRc))", mapRc == 0)

@@ -16,6 +16,8 @@ import Foundation
     private var _hookAdd: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<UnsafeMutableRawPointer?>?, Int32, UnsafeMutableRawPointer?, UInt64, UInt64, UInt64) -> Int32)?
     private var _hookDel: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32)?
     private var _strerror: (@convention(c) (Int32) -> UnsafePointer<CChar>?)?
+    private var _version: (@convention(c) (UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<UInt32>?) -> UInt32)?
+    private var _errno: (@convention(c) (UnsafeMutableRawPointer?) -> Int32)?
 
     @objc private(set) var engine: UnsafeMutableRawPointer?
 
@@ -63,12 +65,28 @@ import Foundation
         _hookAdd = unsafeBitCast(dlsym(libHandle, "uc_hook_add"), to: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<UnsafeMutableRawPointer?>?, Int32, UnsafeMutableRawPointer?, UInt64, UInt64, UInt64) -> Int32).self)
         _hookDel = unsafeBitCast(dlsym(libHandle, "uc_hook_del"), to: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32).self)
         _strerror = unsafeBitCast(dlsym(libHandle, "uc_strerror"), to: (@convention(c) (Int32) -> UnsafePointer<CChar>?).self)
+        _version = unsafeBitCast(dlsym(libHandle, "uc_version"), to: (@convention(c) (UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<UInt32>?) -> UInt32).self)
+        _errno = unsafeBitCast(dlsym(libHandle, "uc_errno"), to: (@convention(c) (UnsafeMutableRawPointer?) -> Int32).self)
 
-        guard _open != nil, _close != nil, _memMap != nil, _memUnmap != nil,
-              _memRead != nil, _memWrite != nil, _regRead != nil, _regWrite != nil,
-              _emuStart != nil, _emuStop != nil, _hookAdd != nil, _hookDel != nil,
-              _strerror != nil else {
-            loadError = "libunicorn missing required API symbols"
+        var missing: [String] = []
+        if _open == nil { missing.append("uc_open") }
+        if _close == nil { missing.append("uc_close") }
+        if _memMap == nil { missing.append("uc_mem_map") }
+        if _memUnmap == nil { missing.append("uc_mem_unmap") }
+        if _memRead == nil { missing.append("uc_mem_read") }
+        if _memWrite == nil { missing.append("uc_mem_write") }
+        if _regRead == nil { missing.append("uc_reg_read") }
+        if _regWrite == nil { missing.append("uc_reg_write") }
+        if _emuStart == nil { missing.append("uc_emu_start") }
+        if _emuStop == nil { missing.append("uc_emu_stop") }
+        if _hookAdd == nil { missing.append("uc_hook_add") }
+        if _hookDel == nil { missing.append("uc_hook_del") }
+        if _strerror == nil { missing.append("uc_strerror") }
+        if _version == nil { missing.append("uc_version") }
+        if _errno == nil { missing.append("uc_errno") }
+
+        guard missing.isEmpty else {
+            loadError = "libunicorn missing required API symbols: " + missing.joined(separator: ", ")
             dlclose(libHandle)
             self.handle = nil
             return false
@@ -159,6 +177,19 @@ import Foundation
     @objc func strerror(_ code: Int32) -> String {
         guard let fn = _strerror else { return "unknown error" }
         return fn(code).map(String.init(cString:)) ?? "unknown error"
+    }
+
+    @objc func libraryVersion() -> String {
+        guard let fn = _version else { return "unknown" }
+        var major: UInt32 = 0
+        var minor: UInt32 = 0
+        let raw = fn(&major, &minor)
+        return String(format: "%u.%u.0 (0x%x)", major, minor, raw)
+    }
+
+    @objc func lastErrno() -> Int32 {
+        guard let fn = _errno, let eng = engine else { return -1 }
+        return fn(eng)
     }
 
     @objc func memWriteBytes(_ address: UInt64, bytes: [UInt8]) -> Int32 {
