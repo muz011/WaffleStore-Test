@@ -34,6 +34,8 @@ static void on_unmapped(void *uc, uint32_t type, uint64_t addr, int size, int64_
 
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     const char *libpath = argc > 1 ? argv[1] : "libunicorn.2.dylib";
     void *h = dlopen(libpath, RTLD_NOW);
     if (!h) {
@@ -48,6 +50,10 @@ int main(int argc, char **argv)
     hookadd_fn hookadd_ = (hookadd_fn)dlsym(h, "uc_hook_add");
     close_fn close_ = (close_fn)dlsym(h, "uc_close");
     strerr_fn strerr_ = (strerr_fn)dlsym(h, "uc_strerror");
+
+    printf("symbols open=%p map=%p write=%p start=%p hookadd=%p close=%p strerr=%p\n",
+           (void *)open_, (void *)map_, (void *)write_, (void *)start_,
+           (void *)hookadd_, (void *)close_, (void *)strerr_);
 
     if (!open_ || !map_ || !write_ || !start_ || !hookadd_ || !close_ || !strerr_) {
         printf("missing unicorn symbols\n");
@@ -77,10 +83,12 @@ int main(int argc, char **argv)
     write_(uc, 0x20000, unmapped_write, sizeof(unmapped_write));
     printf("code written\n");
 
-    rc = hookadd_(uc, NULL, UC_HOOK_MEM_WRITE, (void *)on_write, 0, 0, 0);
-    printf("hookadd WRITE rc=%d\n", rc);
-    rc = hookadd_(uc, NULL, UC_HOOK_MEM_WRITE_UNMAPPED, (void *)on_unmapped, 0, 0, 0);
-    printf("hookadd WRITE_UNMAPPED rc=%d\n", rc);
+    void *hook1 = NULL;
+    void *hook2 = NULL;
+    rc = hookadd_(uc, &hook1, UC_HOOK_MEM_WRITE, (void *)on_write, 0, 0, 0);
+    printf("hookadd WRITE rc=%d handle=%p\n", rc, hook1);
+    rc = hookadd_(uc, &hook2, UC_HOOK_MEM_WRITE_UNMAPPED, (void *)on_unmapped, 0, 0, 0);
+    printf("hookadd WRITE_UNMAPPED rc=%d handle=%p\n", rc, hook2);
 
     write_fires = unmapped_fires = 0;
     rc = start_(uc, 0x10000, 0x10000 + sizeof(mapped_write), 0, 0);
