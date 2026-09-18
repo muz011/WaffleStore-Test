@@ -114,6 +114,9 @@ struct UnicornSmokeTest {
         let memHookHandle = uni.lastHook
         check("h) mem fault hook installs (rc=\(memHookRc), handle=\(memHookHandle))", memHookRc == 0 && memHookHandle != 0)
 
+        let map4Rc = uni.memMap(0x40000, size: 0x1000, perms: 7)
+        check("violation region mapped (rc=\(map4Rc))", map4Rc == 0)
+
         let movStore: [UInt8] = [0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x60, 0x00]
         let w4 = uni.memWriteBytes(0x40000, bytes: movStore)
         check("violation region code written (rc=\(w4))", w4 == 0)
