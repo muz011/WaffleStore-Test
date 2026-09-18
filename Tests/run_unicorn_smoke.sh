@@ -8,7 +8,8 @@ if ! command -v swiftc >/dev/null 2>&1; then
   exit 2
 fi
 
-swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift
+clang -O0 -c Tests/unicorn_smoke_helper.c -o /tmp/wfs_unicorn_smoke.o
+swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift /tmp/wfs_unicorn_smoke.o
 
 LIB=""
 if [[ -n "${WFS_UNICORN_LIB:-}" ]]; then

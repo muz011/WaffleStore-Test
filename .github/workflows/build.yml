@@ -33,7 +33,8 @@ jobs:
       - name: Compile and run Unicorn smoke test
         run: |
           cd $GITHUB_WORKSPACE
-          swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift
+          clang -O0 -c Tests/unicorn_smoke_helper.c -o /tmp/wfs_unicorn_smoke.o
+          swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift /tmp/wfs_unicorn_smoke.o
           HOMEBREW_NO_AUTO_UPDATE=1 brew install unicorn >/dev/null 2>&1 || echo "brew install unicorn unavailable"
           LIB="$(brew --prefix unicorn 2>/dev/null)/lib/libunicorn.2.dylib"
           if [[ -e "$LIB" ]]; then

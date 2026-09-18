@@ -1,9 +1,9 @@
 import Foundation
 
-var smokeHookFires = 0
+var smokeClosureFires = 0
 
-let smokeHookCb: @convention(c) (UnsafeMutableRawPointer?, UInt64, UInt32, UInt64) -> Void = { _, _, _, _ in
-    smokeHookFires += 1
+let smokeClosureCb: @convention(c) (UnsafeMutableRawPointer?, UInt64, UInt32, UInt64) -> Void = { _, _, _, _ in
+    smokeClosureFires += 1
 }
 
 @main
@@ -49,6 +49,13 @@ struct UnicornSmokeTest {
         let rip = uni.regReadU64(41)
         check("execution reached end (RIP=0x\(String(rip, radix: 16)))", rip == 0x1000a)
 
+        guard let cbPtr = dlsym(dlopen(nil, RTLD_NOW), "wfs_smoke_hook_cb"),
+              let countSym = dlsym(dlopen(nil, RTLD_NOW), "wfs_smoke_hook_count") else {
+            print("FAIL: resolve C hook helper symbols")
+            exit(1)
+        }
+        let hookCount = unsafeBitCast(countSym, to: (@convention(c) () -> UInt64).self)
+
         let hookMapRc = uni.memMap(0x20000, size: 0x1000, perms: 7)
         check("hook region mapped (rc=\(hookMapRc))", hookMapRc == 0)
 
@@ -56,25 +63,40 @@ struct UnicornSmokeTest {
         let w2 = uni.memWriteBytes(0x20000, bytes: nops)
         check("hook region code written (rc=\(w2))", w2 == 0)
 
-        let cbPtr = unsafeBitCast(smokeHookCb, to: UnsafeMutableRawPointer.self)
         let hookRc = uni.hookAdd(type: 1, callback: cbPtr, userData: 0, begin: 0x20000, end: 0x20010)
         let hookHandle = uni.lastHook
-        check("f) code hook installs (rc=\(hookRc), handle=\(hookHandle))", hookRc == 0 && hookHandle != 0)
+        check("f) ranged code hook installs (rc=\(hookRc), handle=\(hookHandle))", hookRc == 0 && hookHandle != 0)
 
-        let runsPre = smokeHookFires
+        let rangedBefore = hookCount()
         let hr1 = uni.emuStart(0x20000, until: 0x20003, timeout: 0, count: 0)
         check("hooked region executes (rc=\(hr1))", hr1 == 0)
         let rip2 = uni.regReadU64(41)
         check("hooked region actually ran (RIP=0x\(String(rip2, radix: 16)))", rip2 == 0x20003)
-        check("f) hook fired during execution (fires: \(smokeHookFires - runsPre))", smokeHookFires > runsPre)
+        check("f) ranged hook fired during execution (fires: \(hookCount() - rangedBefore))", hookCount() > rangedBefore)
 
         let delRc = uni.hookDel(hookHandle)
         check("hook removes (rc=\(delRc))", delRc == 0)
 
-        let runsBase = smokeHookFires
+        let delBase = hookCount()
         let hr2 = uni.emuStart(0x20000, until: 0x20003, timeout: 0, count: 0)
         check("region executes after hook removal (rc=\(hr2))", hr2 == 0)
-        check("hook no longer fires (deltas: \(smokeHookFires - runsBase))", smokeHookFires == runsBase)
+        check("hook no longer fires (deltas: \(hookCount() - delBase))", hookCount() == delBase)
+
+        let fullHookRc = uni.hookAdd(type: 1, callback: cbPtr, userData: 0, begin: 1, end: 0)
+        let fullHandle = uni.lastHook
+        check("full-range hook installs (rc=\(fullHookRc), handle=\(fullHandle))", fullHookRc == 0 && fullHandle != 0)
+
+        let map3Rc = uni.memMap(0x30000, size: 0x1000, perms: 7)
+        check("second region mapped (rc=\(map3Rc))", map3Rc == 0)
+        let w3 = uni.memWriteBytes(0x30000, bytes: nops)
+        check("second region code written (rc=\(w3))", w3 == 0)
+
+        let fullBefore = hookCount()
+        let hr3 = uni.emuStart(0x30000, until: 0x30003, timeout: 0, count: 0)
+        check("second region executes (rc=\(hr3))", hr3 == 0)
+        check("full-range hook fires (fires: \(hookCount() - fullBefore))", hookCount() > fullBefore)
+
+        _ = uni.hookDel(fullHandle)
 
         uni.closeEngine()
         check("g) engine closes cleanly (engine=nil: \(uni.engine == nil))", uni.engine == nil)
