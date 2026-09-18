@@ -48,7 +48,7 @@ typedef int (*uc_reg_read_func)(uc_engine uc, int regid, void *value);
 typedef int (*uc_reg_write_func)(uc_engine uc, int regid, const void *value);
 typedef int (*uc_emu_start_func)(uc_engine uc, uint64_t begin, uint64_t until, uint64_t timeout, uint64_t count);
 typedef int (*uc_emu_stop_func)(uc_engine uc);
-typedef int (*uc_hook_add_func)(uc_engine uc, void **hook, int type, void *callback, uint64_t user_data, uint64_t begin, uint64_t end);
+typedef int (*uc_hook_add_func)(uc_engine uc, void **hook, int type, void *callback, uint64_t begin, uint64_t end, uint64_t user_data);
 typedef int (*uc_hook_del_func)(uc_engine uc, void *hook);
 typedef const char* (*uc_strerror_func)(int code);
 typedef int (*uc_ctl_func)(uc_engine uc, uint32_t control, ...);
