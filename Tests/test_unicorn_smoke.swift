@@ -114,9 +114,13 @@ struct UnicornSmokeTest {
         let memHookHandle = uni.lastHook
         check("h) mem fault hook installs (rc=\(memHookRc), handle=\(memHookHandle))", memHookRc == 0 && memHookHandle != 0)
 
+        let movStore: [UInt8] = [0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x60, 0x00]
+        let w4 = uni.memWriteBytes(0x40000, bytes: movStore)
+        check("violation region code written (rc=\(w4))", w4 == 0)
+
         let memBefore = memHookCount()
-        let badRc = uni.emuStart(0x50000, until: 0x50005, timeout: 0, count: 0)
-        check("unmapped fetch faults (rc=\(badRc))", badRc != 0)
+        let badRc = uni.emuStart(0x40000, until: 0x40010, timeout: 0, count: 0)
+        check("unmapped write faults (rc=\(badRc))", badRc != 0)
         check("h) mem fault hook fired (fires: \(memHookCount() - memBefore))", memHookCount() > memBefore)
 
         let memDelRc = uni.hookDel(memHookHandle)
