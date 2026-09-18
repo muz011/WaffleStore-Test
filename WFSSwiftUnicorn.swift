@@ -119,7 +119,8 @@ import Foundation
 
     @objc private(set) var lastHook: UInt64 = 0
 
-    @objc func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64) -> Int32 {
+    @objc(hookAdd:callback:userData:begin:end:)
+    func hookAdd(type: Int32, callback: UnsafeMutableRawPointer?, userData: UInt64, begin: UInt64, end: UInt64) -> Int32 {
         guard let fn = _hookAdd, let eng = engine else { return -1 }
         var hookPtr: UnsafeMutableRawPointer?
         let rc = fn(eng, &hookPtr, type, callback, userData, begin, end)
