@@ -102,6 +102,26 @@ struct UnicornSmokeTest {
 
         _ = uni.hookDel(hook2Handle)
 
+        guard let memCb = dlsym(dlopen(nil, RTLD_NOW), "wfs_smoke_mem_cb"),
+              let memCountSym = dlsym(dlopen(nil, RTLD_NOW), "wfs_smoke_mem_count") else {
+            print("FAIL: resolve C mem hook helper symbols")
+            exit(1)
+        }
+        let memHookCount = unsafeBitCast(memCountSym, to: (@convention(c) () -> UInt64).self)
+
+        let memHookType = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9)
+        let memHookRc = uni.hookAdd(type: memHookType, callback: memCb, userData: 0, begin: 1, end: 0)
+        let memHookHandle = uni.lastHook
+        check("h) mem fault hook installs (rc=\(memHookRc), handle=\(memHookHandle))", memHookRc == 0 && memHookHandle != 0)
+
+        let memBefore = memHookCount()
+        let badRc = uni.emuStart(0x50000, until: 0x50005, timeout: 0, count: 0)
+        check("unmapped fetch faults (rc=\(badRc))", badRc != 0)
+        check("h) mem fault hook fired (fires: \(memHookCount() - memBefore))", memHookCount() > memBefore)
+
+        let memDelRc = uni.hookDel(memHookHandle)
+        check("mem fault hook removes (rc=\(memDelRc))", memDelRc == 0)
+
         uni.closeEngine()
         check("g) engine closes cleanly (engine=nil: \(uni.engine == nil))", uni.engine == nil)
 

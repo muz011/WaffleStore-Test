@@ -7,6 +7,10 @@
 #import <mach-o/nlist.h>
 #import <dlfcn.h>
 
+@interface WFSSAPMachine (MemHookInternal)
+- (void)handleMemHookType:(int32_t)type address:(uint64_t)address size:(int)size;
+@end
+
 #ifndef INDIRECT_SYMBOL_ABS
 #define INDIRECT_SYMBOL_ABS    0x40000000
 #endif
@@ -51,6 +55,32 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     WFSSAPShims *shims = (__bridge WFSSAPShims *)user_data;
     if (shims) {
         [shims dispatchAtAddress:address];
+    }
+}
+
+static const char *memTypeName(uint32_t type)
+{
+    switch (type) {
+        case UC_MEM_READ:            return "READ";
+        case UC_MEM_WRITE:           return "WRITE";
+        case UC_MEM_FETCH:           return "FETCH";
+        case UC_MEM_READ_UNMAPPED:   return "READ_UNMAPPED";
+        case UC_MEM_WRITE_UNMAPPED:  return "WRITE_UNMAPPED";
+        case UC_MEM_FETCH_UNMAPPED:  return "FETCH_UNMAPPED";
+        case UC_MEM_READ_PROT:       return "READ_PROT";
+        case UC_MEM_WRITE_PROT:      return "WRITE_PROT";
+        case UC_MEM_FETCH_PROT:      return "FETCH_PROT";
+        case UC_MEM_READ_AFTER:      return "READ_AFTER";
+        default:                     return "UNKNOWN";
+    }
+}
+
+static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, int size, int64_t value, void *user_data)
+{
+    (void)uc; (void)value;
+    WFSSAPMachine *machine = (__bridge WFSSAPMachine *)user_data;
+    if (machine) {
+        [machine handleMemHookType:type address:address size:size];
     }
 }
 
@@ -402,6 +432,8 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 @property (nonatomic, assign) uint64_t scratchCursor;
 @property (nonatomic, assign) BOOL closed;
 @property (nonatomic, assign) uint64_t codeHook;
+@property (nonatomic, assign) uint64_t memHook;
+@property (nonatomic, copy, nullable) NSString *memFault;
 @end
 
 @implementation WFSSAPMachine
@@ -508,6 +540,25 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
             _codeHook = _unicorn.lastHook;
             if (_codeHook == 0) {
                 if (error) *error = [self machineError:@"hookAdd returned no hook handle"];
+                return nil;
+            }
+        }
+
+        {
+            int memHookType = UC_HOOK_MEM_READ_UNMAPPED
+                            | UC_HOOK_MEM_WRITE_UNMAPPED
+                            | UC_HOOK_MEM_FETCH_UNMAPPED
+                            | UC_HOOK_MEM_READ_PROT
+                            | UC_HOOK_MEM_WRITE_PROT
+                            | UC_HOOK_MEM_FETCH_PROT;
+            int memHookRc = [_unicorn hookAdd:memHookType callback:(void *)machineMemHookCallback userData:(uint64_t)(__bridge void *)self begin:1 end:0];
+            if (memHookRc != 0) {
+                if (error) *error = [self machineError:[NSString stringWithFormat:@"memHookAdd failed: %s", [[_unicorn strerror:memHookRc] UTF8String]]];
+                return nil;
+            }
+            _memHook = _unicorn.lastHook;
+            if (_memHook == 0) {
+                if (error) *error = [self machineError:@"memHookAdd returned no hook handle"];
                 return nil;
             }
         }
@@ -619,6 +670,16 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
 #pragma mark - Invocation
 
+- (void)handleMemHookType:(int32_t)type address:(uint64_t)address size:(int)size
+{
+    uint64_t rip = [_unicorn regReadU64:UC_X86_REG_RIP];
+    NSString *desc = [NSString stringWithFormat:@"memory violation %s at 0x%llx size=%d (RIP=0x%llx)",
+                      memTypeName((uint32_t)type), address, size, rip];
+    self.memFault = desc;
+    NSLog(@"WFSSAPMachine: %@", desc);
+    [_unicorn emuStop];
+}
+
 - (uint64_t)invoke:(uint64_t)function args:(uint64_t[])args count:(int)count
 {
     if (_closed || function == 0) return 0;
@@ -650,6 +711,12 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
     if (_shims.faulted) {
         NSLog(@"WFSSAPMachine: shim fault during 0x%llx: %@", function, _shims.fault.localizedDescription ?: @"?");
+        return 0;
+    }
+
+    if (self.memFault) {
+        NSLog(@"WFSSAPMachine: %@ during 0x%llx", self.memFault, function);
+        self.memFault = nil;
         return 0;
     }
 
@@ -767,6 +834,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     _closed = YES;
     if (_unicorn) {
         if (_codeHook) { [_unicorn hookDel:_codeHook]; _codeHook = 0; }
+        if (_memHook) { [_unicorn hookDel:_memHook]; _memHook = 0; }
         [_unicorn emuStop];
     }
     [_shims close];

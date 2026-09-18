@@ -31,13 +31,23 @@ enum {
     UC_HOOK_MEM_READ_PROT       = 1 << 7,
     UC_HOOK_MEM_WRITE_PROT      = 1 << 8,
     UC_HOOK_MEM_FETCH_PROT      = 1 << 9,
+    UC_HOOK_MEM_READ            = 1 << 10,
+    UC_HOOK_MEM_WRITE           = 1 << 11,
+    UC_HOOK_MEM_FETCH           = 1 << 12,
 };
 
-enum {
-    UC_MEM_READ_UNMAPPED  = 1,
-    UC_MEM_WRITE_UNMAPPED = 2,
-    UC_MEM_FETCH_UNMAPPED = 3,
-};
+typedef enum {
+    UC_MEM_READ                = 1,
+    UC_MEM_WRITE               = 2,
+    UC_MEM_FETCH               = 3,
+    UC_MEM_READ_UNMAPPED       = 4,
+    UC_MEM_WRITE_UNMAPPED      = 5,
+    UC_MEM_FETCH_UNMAPPED      = 6,
+    UC_MEM_READ_PROT           = 7,
+    UC_MEM_WRITE_PROT          = 8,
+    UC_MEM_FETCH_PROT          = 9,
+    UC_MEM_READ_AFTER          = 10,
+} wfs_uc_mem_type;
 
 enum uc_x86_reg {
     UC_X86_REG_RAX = 35,

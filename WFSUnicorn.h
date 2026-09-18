@@ -26,10 +26,20 @@
 #define UC_HOOK_MEM_READ_PROT       (1 << 7)
 #define UC_HOOK_MEM_WRITE_PROT      (1 << 8)
 #define UC_HOOK_MEM_FETCH_PROT      (1 << 9)
+#define UC_HOOK_MEM_READ            (1 << 10)
+#define UC_HOOK_MEM_WRITE           (1 << 11)
+#define UC_HOOK_MEM_FETCH           (1 << 12)
 
-#define UC_MEM_READ_UNMAPPED    1
-#define UC_MEM_WRITE_UNMAPPED   2
-#define UC_MEM_FETCH_UNMAPPED   3
+#define UC_MEM_READ                1
+#define UC_MEM_WRITE               2
+#define UC_MEM_FETCH               3
+#define UC_MEM_READ_UNMAPPED       4
+#define UC_MEM_WRITE_UNMAPPED      5
+#define UC_MEM_FETCH_UNMAPPED      6
+#define UC_MEM_READ_PROT           7
+#define UC_MEM_WRITE_PROT          8
+#define UC_MEM_FETCH_PROT          9
+#define UC_MEM_READ_AFTER          10
 
 enum uc_x86_reg {
     UC_X86_REG_RAX = 35,
