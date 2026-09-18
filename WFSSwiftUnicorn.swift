@@ -123,13 +123,18 @@ import Foundation
         guard let fn = _hookAdd, let eng = engine else { return -1 }
         var hookPtr: UnsafeMutableRawPointer?
         let rc = fn(eng, &hookPtr, type, callback, userData, begin, end)
-        lastHook = UInt64(bitPattern: hookPtr)
+        if let ptr = hookPtr {
+            lastHook = UInt64(bitPattern: Int(bitPattern: ptr))
+        } else {
+            lastHook = 0
+        }
         return rc
     }
 
     @objc func hookDel(_ hook: UInt64) -> Int32 {
         guard let fn = _hookDel, let eng = engine else { return -1 }
-        return fn(eng, UnsafeMutableRawPointer(bitPattern: hook))
+        let ptr = UnsafeMutableRawPointer(bitPattern: Int(hook))
+        return fn(eng, ptr)
     }
 
     @objc func strerror(_ code: Int32) -> String {
