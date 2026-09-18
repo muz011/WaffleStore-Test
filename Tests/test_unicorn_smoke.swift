@@ -33,21 +33,21 @@ struct UnicornSmokeTest {
         let mapRc = uni.memMap(0x10000, size: 0x1000, perms: 7)
         check("c) memory can be mapped (rc=\(mapRc))", mapRc == 0)
 
-        let movRax: [UInt8] = [0x48, 0xB8, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC3]
+        let movRax: [UInt8] = [0x48, 0xB8, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         let w1 = uni.memWriteBytes(0x10000, bytes: movRax)
-        check("write mov rax, 0x1234; ret (rc=\(w1))", w1 == 0)
+        check("write mov rax, 0x1234 (rc=\(w1))", w1 == 0)
 
         uni.regWriteU64(35, 0)
         uni.regWriteU64(41, 0x10000)
 
-        let startRc = uni.emuStart(0x10000, until: 0x1000b, timeout: 0, count: 0)
+        let startRc = uni.emuStart(0x10000, until: 0x1000a, timeout: 0, count: 0)
         check("d) instruction sequence executes (rc=\(startRc), strerror=\(uni.strerror(startRc)))", startRc == 0)
 
         let rax = uni.regReadU64(35)
         check("e) registers readable/writable (RAX=0x\(String(rax, radix: 16)))", rax == 0x1234)
 
         let rip = uni.regReadU64(41)
-        check("execution reached end (RIP=0x\(String(rip, radix: 16)))", rip == 0x1000b)
+        check("execution reached end (RIP=0x\(String(rip, radix: 16)))", rip == 0x1000a)
 
         let hookMapRc = uni.memMap(0x20000, size: 0x1000, perms: 7)
         check("hook region mapped (rc=\(hookMapRc))", hookMapRc == 0)
@@ -64,6 +64,8 @@ struct UnicornSmokeTest {
         let runsPre = smokeHookFires
         let hr1 = uni.emuStart(0x20000, until: 0x20003, timeout: 0, count: 0)
         check("hooked region executes (rc=\(hr1))", hr1 == 0)
+        let rip2 = uni.regReadU64(41)
+        check("hooked region actually ran (RIP=0x\(String(rip2, radix: 16)))", rip2 == 0x20003)
         check("f) hook fired during execution (fires: \(smokeHookFires - runsPre))", smokeHookFires > runsPre)
 
         let delRc = uni.hookDel(hookHandle)
