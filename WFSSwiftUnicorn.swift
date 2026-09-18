@@ -34,7 +34,20 @@ import Foundation
         if libHandle == nil {
             libHandle = dlopen("libunicorn.dylib", RTLD_NOW)
         }
-        guard let libHandle = libHandle else { return false }
+        if let override = getenv("WFS_UNICORN_LIB") {
+            let path = String(cString: override)
+            if !path.isEmpty, let h = dlopen(path, RTLD_NOW) {
+                libHandle = h
+            }
+        }
+        guard let libHandle = libHandle else {
+            if let d = dlerror() {
+                loadError = String(cString: d)
+            } else {
+                loadError = "libunicorn dylib not found"
+            }
+            return false
+        }
         self.handle = libHandle
 
         _open = unsafeBitCast(dlsym(libHandle, "uc_open"), to: (@convention(c) (UInt32, UInt32, UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32).self)
@@ -55,6 +68,7 @@ import Foundation
               _memRead != nil, _memWrite != nil, _regRead != nil, _regWrite != nil,
               _emuStart != nil, _emuStop != nil, _hookAdd != nil, _hookDel != nil,
               _strerror != nil else {
+            loadError = "libunicorn missing required API symbols"
             dlclose(libHandle)
             self.handle = nil
             return false
@@ -63,6 +77,8 @@ import Foundation
     }
 
     @objc var isLoaded: Bool { return handle != nil }
+
+    @objc private(set) var loadError: String = ""
 
     @objc func openArch(_ arch: UInt32, mode: UInt32) -> Int32 {
         guard let fn = _open else { return -1 }

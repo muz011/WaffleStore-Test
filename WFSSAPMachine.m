@@ -426,7 +426,8 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
     WFSSwiftUnicorn *unicorn = [WFSSwiftUnicorn create];
     if (!unicorn || ![unicorn isLoaded]) {
-        if (error) *error = [self machineError:@"Failed to load Unicorn. Install libunicorn.dylib."];
+        NSString *detail = unicorn.loadError.length ? unicorn.loadError : @"libunicorn.dylib not found";
+        if (error) *error = [self machineError:[NSString stringWithFormat:@"Failed to load Unicorn: %@", detail]];
         return nil;
     }
     _unicorn = unicorn;

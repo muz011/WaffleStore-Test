@@ -30,6 +30,18 @@ jobs:
           mv ./packages/*.ipa ./output/WaffleStore-$SHORT.ipa
           cp ./output/WaffleStore-$SHORT.ipa ./output/WaffleStore.tipa
 
+      - name: Compile and run Unicorn smoke test
+        run: |
+          cd $GITHUB_WORKSPACE
+          swiftc -o /tmp/wfs_unicorn_smoke WFSSwiftUnicorn.swift Tests/test_unicorn_smoke.swift
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install unicorn >/dev/null 2>&1 || echo "brew install unicorn unavailable"
+          LIB="$(brew --prefix unicorn 2>/dev/null)/lib/libunicorn.2.dylib"
+          if [[ -e "$LIB" ]]; then
+            WFS_UNICORN_LIB="$LIB" /tmp/wfs_unicorn_smoke
+          else
+            echo "libunicorn not present; smoke test compiled but skipped runtime"
+          fi
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
