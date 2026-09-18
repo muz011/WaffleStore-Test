@@ -215,6 +215,13 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
         }
     }
 
+    for (NSDictionary *seg in segments) {
+        if ([seg[@"name"] isEqualToString:@"__TEXT"]) {
+            _base = [seg[@"vmaddr"] unsignedLongLongValue];
+            break;
+        }
+    }
+
     _segments = segments;
     _rebases = rebases;
     _binds = binds;
@@ -467,10 +474,22 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
         }
         _resolvedEntries = entries;
 
-        [self mapMemory];
+        {
+            int memRc = [self mapMemory];
+            if (memRc != 0) {
+                if (error) *error = [self machineError:[NSString stringWithFormat:@"memory map failed: %s", [[_unicorn strerror:memRc] UTF8String]]];
+                return nil;
+            }
+        }
 
         uint8_t hlt = 0xF4;
-        [_unicorn memWrite:kReturnAddress data:&hlt size:1];
+        {
+            int rcHlt = [_unicorn memWrite:kReturnAddress data:&hlt size:1];
+            if (rcHlt != 0) {
+                if (error) *error = [self machineError:[NSString stringWithFormat:@"memWrite return address failed: %s", [[_unicorn strerror:rcHlt] UTF8String]]];
+                return nil;
+            }
+        }
 
         NSError *shimError = nil;
         _shims = [[WFSSAPShims alloc] initWithEngine:_engine api:_unicorn coreExports:allExports icxs:coreFPICXS error:&shimError];
@@ -481,8 +500,15 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
         {
             int hookRc = [_unicorn hookAdd:UC_HOOK_CODE callback:(void *)shimCodeHookCallback userData:(uint64_t)(__bridge void *)_shims begin:0x0000200000000000ULL end:0x0000200000080000ULL];
+            if (hookRc != 0) {
+                if (error) *error = [self machineError:[NSString stringWithFormat:@"hookAdd failed: %s", [[_unicorn strerror:hookRc] UTF8String]]];
+                return nil;
+            }
             _codeHook = _unicorn.lastHook;
-            (void)hookRc;
+            if (_codeHook == 0) {
+                if (error) *error = [self machineError:@"hookAdd returned no hook handle"];
+                return nil;
+            }
         }
 
         uint64_t(^resolver)(NSString *) = ^uint64_t(NSString *n) {
@@ -522,7 +548,7 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 
 #pragma mark - Memory
 
-- (void)mapMemory
+- (int)mapMemory
 {
     struct { uint64_t addr; uint64_t size; } regions[] = {
         {kReturnAddress, kPageSize},
@@ -531,8 +557,13 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
         {kStackBase, kStackSize},
     };
     for (size_t i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
-        [_unicorn memMap:regions[i].addr size:regions[i].size perms:UC_PROT_ALL];
+        int rc = [_unicorn memMap:regions[i].addr size:regions[i].size perms:UC_PROT_ALL];
+        if (rc != 0) {
+            NSLog(@"WFSSAPMachine: memMap 0x%llx/0x%llx failed: %@", regions[i].addr, regions[i].size, [_unicorn strerror:rc]);
+            return rc;
+        }
     }
+    return 0;
 }
 
 - (uint64_t)scratchReserve:(uint64_t)size
@@ -582,8 +613,6 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     if (len > kMaxOutputSize || ptr == 0) return nil;
     NSMutableData *out = [NSMutableData dataWithLength:len];
     [_unicorn memRead:ptr buffer:out.mutableBytes size:len];
-    uint64_t mapped = (len + kPageSize - 1) & ~(kPageSize - 1);
-    [_unicorn memUnmap:ptr size:mapped];
     return out;
 }
 
@@ -613,12 +642,21 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
     [_unicorn regWriteU64:UC_X86_REG_RSP :stackPtr];
 
     int rc = [_unicorn emuStart:function until:kReturnAddress timeout:kSAPGuestTimeout * 1000000ULL count:0];
-    if (rc != 0) return 0;
+    if (rc != 0) {
+        NSLog(@"WFSSAPMachine: uc_emu_start(0x%llx) failed: %@", function, [_unicorn strerror:rc]);
+        return 0;
+    }
 
-    if (_shims.faulted) return 0;
+    if (_shims.faulted) {
+        NSLog(@"WFSSAPMachine: shim fault during 0x%llx: %@", function, _shims.fault.localizedDescription ?: @"?");
+        return 0;
+    }
 
     uint64_t rip = [_unicorn regReadU64:UC_X86_REG_RIP];
-    if (rip != kReturnAddress) return 0;
+    if (rip != kReturnAddress) {
+        NSLog(@"WFSSAPMachine: execution stopped at 0x%llx, expected kReturnAddress", rip);
+        return 0;
+    }
 
     uint64_t rax = [_unicorn regReadU64:UC_X86_REG_RAX];
     return rax;
@@ -726,10 +764,13 @@ static void shimCodeHookCallback(void *uc, uint64_t address, uint32_t size, void
 {
     if (_closed) return;
     _closed = YES;
+    if (_unicorn) {
+        if (_codeHook) { [_unicorn hookDel:_codeHook]; _codeHook = 0; }
+        [_unicorn emuStop];
+    }
     [_shims close];
     _shims = nil;
     if (_unicorn) {
-        if (_codeHook) { [_unicorn hookDel:_codeHook]; _codeHook = 0; }
         [_unicorn closeEngine]; _unicorn = nil;
     }
 }

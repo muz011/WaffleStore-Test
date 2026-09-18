@@ -239,9 +239,13 @@ static const uint64_t kShimHeapSize = 16 << 20;
 
 - (void)dispatchAtAddress:(uint64_t)address
 {
+    if (address < kShimBase || address >= kShimBase + kShimCodeSize) {
+        [self fail:[NSString stringWithFormat:@"dispatch outside shim code range %#llx", address]];
+        return;
+    }
+
     WFSSAPShimEntry *entry = _entries[@(address)];
     if (!entry) {
-        [self fail:[NSString stringWithFormat:@"guest entered unknown shim address %#llx", address]];
         return;
     }
 

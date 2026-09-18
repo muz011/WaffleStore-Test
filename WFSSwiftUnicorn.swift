@@ -51,8 +51,10 @@ import Foundation
         _hookDel = unsafeBitCast(dlsym(libHandle, "uc_hook_del"), to: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32).self)
         _strerror = unsafeBitCast(dlsym(libHandle, "uc_strerror"), to: (@convention(c) (Int32) -> UnsafePointer<CChar>?).self)
 
-        guard _open != nil, _close != nil, _memMap != nil, _memRead != nil,
-              _memWrite != nil, _regRead != nil, _regWrite != nil, _emuStart != nil else {
+        guard _open != nil, _close != nil, _memMap != nil, _memUnmap != nil,
+              _memRead != nil, _memWrite != nil, _regRead != nil, _regWrite != nil,
+              _emuStart != nil, _emuStop != nil, _hookAdd != nil, _hookDel != nil,
+              _strerror != nil else {
             dlclose(libHandle)
             self.handle = nil
             return false
