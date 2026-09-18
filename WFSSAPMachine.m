@@ -18,19 +18,34 @@
 #define INDIRECT_SYMBOL_LOCAL  0x80000000
 #endif
 
-#ifndef REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB
-#define REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB  0x30
-#endif
-#ifndef REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB
-#define REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80
-#endif
+#define WFS_REBASE_OPCODE_MASK    0xF0
+#define WFS_REBASE_OPCODE_DONE    0x00
+#define WFS_REBASE_OPCODE_SET_TYPE_IMM  0x10
+#define WFS_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB  0x20
+#define WFS_REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB  0x30
+#define WFS_REBASE_OPCODE_ADD_ADDR_ULEB   0x40
+#define WFS_REBASE_OPCODE_DO_REBASE_IMM_TIMES   0x50
+#define WFS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES  0x60
+#define WFS_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB   0x70
+#define WFS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80
 
-#ifndef BIND_OPCODE_DO_BIND_ULEB_TIMES
-#define BIND_OPCODE_DO_BIND_ULEB_TIMES   0xD0
-#endif
-#ifndef BIND_OPCODE_THREADED
-#define BIND_OPCODE_THREADED   0xE0
-#endif
+#define WFS_REBASE_TYPE_POINTER   1
+
+#define WFS_BIND_OPCODE_MASK   0xF0
+#define WFS_BIND_OPCODE_DONE   0x00
+#define WFS_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM   0x10
+#define WFS_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB  0x20
+#define WFS_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM   0x30
+#define WFS_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM  0x40
+#define WFS_BIND_OPCODE_SET_TYPE_IMM   0x50
+#define WFS_BIND_OPCODE_SET_ADDEND_SLEB   0x60
+#define WFS_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB  0x70
+#define WFS_BIND_OPCODE_ADD_ADDR_ULEB   0x80
+#define WFS_BIND_OPCODE_DO_BIND   0x90
+#define WFS_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB   0xA0
+#define WFS_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB  0xC0
+#define WFS_BIND_OPCODE_DO_BIND_ULEB_TIMES   0xD0
+#define WFS_BIND_OPCODE_THREADED   0xE0
 
 static const uint64_t kReturnAddress   = 0x0000000100000000;
 static const uint64_t kCoreFPBase      = 0x0000100000000000;
@@ -384,21 +399,21 @@ static BOOL wfsReadSLEB(const uint8_t **cursor, const uint8_t *end, int64_t *val
     const uint8_t *end = stream + size;
     int segIndex = -1;
     uint64_t offset = 0;
-    uint32_t type = REBASE_TYPE_POINTER;
+    uint32_t type = WFS_REBASE_TYPE_POINTER;
 
     while (p < end) {
         uint8_t opcodeByte = *p++;
-        uint8_t opcode = opcodeByte & REBASE_OPCODE_MASK;
+        uint8_t opcode = opcodeByte & WFS_REBASE_OPCODE_MASK;
 
         switch (opcode) {
-            case REBASE_OPCODE_DONE:
+            case WFS_REBASE_OPCODE_DONE:
                 return YES;
 
-            case REBASE_OPCODE_SET_TYPE_IMM:
+            case WFS_REBASE_OPCODE_SET_TYPE_IMM:
                 type = opcodeByte & 0x0F;
                 break;
 
-            case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
+            case WFS_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 segIndex = opcodeByte & 0x0F;
@@ -406,7 +421,7 @@ static BOOL wfsReadSLEB(const uint8_t **cursor, const uint8_t *end, int64_t *val
                 break;
             }
 
-            case REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB: {
+            case WFS_REBASE_OPCODE_ADD_SEGMENT_AND_OFFSET_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 segIndex = opcodeByte & 0x0F;
@@ -414,26 +429,26 @@ static BOOL wfsReadSLEB(const uint8_t **cursor, const uint8_t *end, int64_t *val
                 break;
             }
 
-            case REBASE_OPCODE_ADD_ADDR_ULEB: {
+            case WFS_REBASE_OPCODE_ADD_ADDR_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 offset += u;
                 break;
             }
 
-            case REBASE_OPCODE_DO_REBASE_IMM_TIMES: {
+            case WFS_REBASE_OPCODE_DO_REBASE_IMM_TIMES: {
                 if (![self addRebaseType:type count:opcodeByte & 0x0F segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
                 break;
             }
 
-            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES: {
+            case WFS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES: {
                 uint64_t count = 0;
                 if (!wfsReadULEB(&p, end, &count)) goto malformed;
                 if (![self addRebaseType:type count:count segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
                 break;
             }
 
-            case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB: {
+            case WFS_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB: {
                 uint64_t u = 0;
                 if (![self addRebaseType:type count:1 segmentIndex:segIndex offset:&offset into:outRebases error:error]) return NO;
                 offset += 8;
@@ -442,7 +457,7 @@ static BOOL wfsReadSLEB(const uint8_t **cursor, const uint8_t *end, int64_t *val
                 break;
             }
 
-            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
+            case WFS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
                 uint64_t count = 0, skip = 0;
                 if (!wfsReadULEB(&p, end, &count)) goto malformed;
                 if (!wfsReadULEB(&p, end, &skip)) goto malformed;
@@ -476,7 +491,7 @@ malformed:
         if (error) *error = [self err:[NSString stringWithFormat:@"%@: rebase segment index %d out of range", _name, segIndex]];
         return NO;
     }
-    if (type != REBASE_TYPE_POINTER) {
+    if (type != WFS_REBASE_TYPE_POINTER) {
         if (error) *error = [self err:[NSString stringWithFormat:@"%@: unsupported rebase type %u", _name, type]];
         return NO;
     }
@@ -504,23 +519,23 @@ malformed:
 
     while (p < end) {
         uint8_t opcodeByte = *p++;
-        uint8_t opcode = opcodeByte & BIND_OPCODE_MASK;
+        uint8_t opcode = opcodeByte & WFS_BIND_OPCODE_MASK;
 
         switch (opcode) {
-            case BIND_OPCODE_DONE:
+            case WFS_BIND_OPCODE_DONE:
                 return YES;
 
-            case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
-            case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+            case WFS_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+            case WFS_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
                 break;
 
-            case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB: {
+            case WFS_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 break;
             }
 
-            case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
+            case WFS_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
                 const uint8_t *symBegin = p;
                 while (p < end && *p) p++;
                 if (p >= end) goto malformed;
@@ -529,15 +544,15 @@ malformed:
                 break;
             }
 
-            case BIND_OPCODE_SET_TYPE_IMM:
+            case WFS_BIND_OPCODE_SET_TYPE_IMM:
                 break;
 
-            case BIND_OPCODE_SET_ADDEND_SLEB: {
+            case WFS_BIND_OPCODE_SET_ADDEND_SLEB: {
                 if (!wfsReadSLEB(&p, end, &addend)) goto malformed;
                 break;
             }
 
-            case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
+            case WFS_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 segIndex = opcodeByte & 0x0F;
@@ -545,20 +560,20 @@ malformed:
                 break;
             }
 
-            case BIND_OPCODE_ADD_ADDR_ULEB: {
+            case WFS_BIND_OPCODE_ADD_ADDR_ULEB: {
                 uint64_t u = 0;
                 if (!wfsReadULEB(&p, end, &u)) goto malformed;
                 offset += u;
                 break;
             }
 
-            case BIND_OPCODE_DO_BIND: {
+            case WFS_BIND_OPCODE_DO_BIND: {
                 if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
                 offset += 8;
                 break;
             }
 
-            case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: {
+            case WFS_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB: {
                 uint64_t u = 0;
                 if (![self addBindSymbol:symbol segmentIndex:segIndex offset:offset addend:addend into:outBinds error:error]) return NO;
                 offset += 8;
@@ -567,7 +582,7 @@ malformed:
                 break;
             }
 
-            case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+            case WFS_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
                 uint64_t count = 0, skip = 0;
                 if (!wfsReadULEB(&p, end, &count)) goto malformed;
                 if (!wfsReadULEB(&p, end, &skip)) goto malformed;
@@ -578,7 +593,7 @@ malformed:
                 break;
             }
 
-            case BIND_OPCODE_DO_BIND_ULEB_TIMES: {
+            case WFS_BIND_OPCODE_DO_BIND_ULEB_TIMES: {
                 uint64_t count = 0;
                 if (!wfsReadULEB(&p, end, &count)) goto malformed;
                 for (uint64_t i = 0; i < count; i++) {
@@ -588,7 +603,7 @@ malformed:
                 break;
             }
 
-            case BIND_OPCODE_THREADED:
+            case WFS_BIND_OPCODE_THREADED:
                 if (error) *error = [self err:[NSString stringWithFormat:@"%@: threaded bind fixups unsupported", _name]];
                 return NO;
 
