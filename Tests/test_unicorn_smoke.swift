@@ -110,7 +110,7 @@ struct UnicornSmokeTest {
         let memHookCount = unsafeBitCast(memCountSym, to: (@convention(c) () -> UInt64).self)
 
         let memHookType: Int32 = 0x3F0
-        let memHookRc = uni.hookAdd(type: memHookType, callback: memCb, userData: 0, begin: 1, end: 0)
+        let memHookRc = uni.hookAdd(type: memHookType, callback: memCb, userData: 0, begin: 0, end: 0)
         let memHookHandle = uni.lastHook
         check("h) mem fault hook installs (rc=\(memHookRc), handle=\(memHookHandle))", memHookRc == 0 && memHookHandle != 0)
 

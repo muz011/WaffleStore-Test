@@ -551,7 +551,7 @@ static void machineMemHookCallback(void *uc, uint32_t type, uint64_t address, in
                             | UC_HOOK_MEM_READ_PROT
                             | UC_HOOK_MEM_WRITE_PROT
                             | UC_HOOK_MEM_FETCH_PROT;
-            int memHookRc = [_unicorn hookAdd:memHookType callback:(void *)machineMemHookCallback userData:(uint64_t)(__bridge void *)self begin:1 end:0];
+            int memHookRc = [_unicorn hookAdd:memHookType callback:(void *)machineMemHookCallback userData:(uint64_t)(__bridge void *)self begin:0 end:0];
             if (memHookRc != 0) {
                 if (error) *error = [self machineError:[NSString stringWithFormat:@"memHookAdd failed: %s", [[_unicorn strerror:memHookRc] UTF8String]]];
                 return nil;
