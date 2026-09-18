@@ -124,7 +124,7 @@ import Foundation
         var hookPtr: UnsafeMutableRawPointer?
         let rc = fn(eng, &hookPtr, type, callback, userData, begin, end)
         if let ptr = hookPtr {
-            lastHook = UInt64(bitPattern: Int(bitPattern: ptr))
+            lastHook = UInt64(Int(bitPattern: ptr))
         } else {
             lastHook = 0
         }
